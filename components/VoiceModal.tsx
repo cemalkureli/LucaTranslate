@@ -21,6 +21,7 @@ interface VoiceModalProps {
   onStopPress: () => void;
   onClose: () => void;
   onSettingsPress?: () => void;
+  onLangSelect?: (code: string) => void;
 }
 
 const BAR_COUNT = 24;
@@ -78,9 +79,22 @@ function EngineHint() {
   return <Text style={styles.engineHint}>Motor: {engine}</Text>;
 }
 
+const QUICK_LANGS = [
+  { code: 'tr', flag: '🇹🇷', name: 'TR' },
+  { code: 'en', flag: '🇬🇧', name: 'EN' },
+  { code: 'de', flag: '🇩🇪', name: 'DE' },
+  { code: 'fr', flag: '🇫🇷', name: 'FR' },
+  { code: 'ar', flag: '🇸🇦', name: 'AR' },
+  { code: 'ru', flag: '🇷🇺', name: 'RU' },
+  { code: 'zh', flag: '🇨🇳', name: 'ZH' },
+  { code: 'ja', flag: '🇯🇵', name: 'JA' },
+  { code: 'ko', flag: '🇰🇷', name: 'KO' },
+  { code: 'es', flag: '🇪🇸', name: 'ES' },
+];
+
 export default function VoiceModal({
   visible, state, sourceLang, partialText = '',
-  onStartPress, onStopPress, onClose, onSettingsPress,
+  onStartPress, onStopPress, onClose, onSettingsPress, onLangSelect,
 }: VoiceModalProps) {
   const isRecording = state === 'recording';
   const isProcessing = state === 'processing';
@@ -114,7 +128,8 @@ export default function VoiceModal({
     if (state === 'requesting') return 'Mikrofon izni isteniyor...';
     if (state === 'recording') return 'Dinliyorum — bırakınca durdurur';
     if (state === 'processing') return 'Ses analiz ediliyor...';
-    if (state === 'error') return 'Web Speech bu cihazda çalışmıyor.\nAyarlar → Ses → Whisper seçin';
+    if (state === 'error') return 'Ses tanıma hatası.\nAyarlar → Ses Tanıma → Whisper seçin';
+    if (sourceLang === 'auto') return 'Konuşma dilinizi seçin veya konuşun';
     return 'Hazır — konuşmaya başlayın';
   };
 
@@ -143,6 +158,25 @@ export default function VoiceModal({
               <CloseIcon size={14} color={isRecording ? Colors.text.muted : Colors.text.secondary} />
             </TouchableOpacity>
           </View>
+
+          {/* Quick lang selector — shown when auto-detect is active */}
+          {sourceLang === 'auto' && !isRecording && !isProcessing && (
+            <View style={styles.quickLangs}>
+              <Text style={styles.quickLangsHint}>Dil seç → konuş:</Text>
+              <View style={styles.quickLangRow}>
+                {QUICK_LANGS.map(l => (
+                  <TouchableOpacity
+                    key={l.code}
+                    style={styles.quickLangBtn}
+                    onPress={() => onLangSelect?.(l.code)}
+                  >
+                    <Text style={styles.quickLangFlag}>{l.flag}</Text>
+                    <Text style={styles.quickLangCode}>{l.name}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          )}
 
           {/* Waveform visualizer */}
           <View style={styles.waveformOuter}>
@@ -337,4 +371,22 @@ const styles = StyleSheet.create({
     borderRadius: 20, paddingHorizontal: 20, paddingVertical: 8,
   },
   settingsBtnText: { color: Colors.accent.primary, fontWeight: '600', fontSize: 13 },
+
+  // Quick lang selector
+  quickLangs: {
+    paddingHorizontal: 16, paddingBottom: 8,
+  },
+  quickLangsHint: {
+    fontSize: 11, color: Colors.text.muted, textAlign: 'center', marginBottom: 8,
+  },
+  quickLangRow: {
+    flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 6,
+  },
+  quickLangBtn: {
+    alignItems: 'center', backgroundColor: Colors.bg.card,
+    borderRadius: 10, borderWidth: 1, borderColor: Colors.bg.cardBorder,
+    paddingHorizontal: 10, paddingVertical: 6, gap: 2,
+  },
+  quickLangFlag: { fontSize: 16 },
+  quickLangCode: { fontSize: 10, color: Colors.text.muted, fontWeight: '600' },
 });

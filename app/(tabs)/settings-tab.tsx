@@ -11,10 +11,9 @@ export default function SettingsTabScreen() {
   const favorites = history.filter(h => h.isFavorite).length;
 
   const items = [
-    { icon: '🌐', label: 'Server', value: settings.preferredInstance.replace('https://', ''), route: '/settings' },
-    { icon: '⚡', label: 'Auto Translate', value: settings.autoTranslate ? 'On' : 'Off', route: '/settings' },
-    { icon: '🕐', label: 'Save History', value: settings.saveHistory ? 'On' : 'Off', route: '/settings' },
-    { icon: '🔊', label: 'TTS Speed', value: 'Normal', route: '/settings' },
+    { icon: '🌐', label: 'Sunucu', value: settings.preferredInstance.replace('https://', ''), route: '/settings' },
+    { icon: '⚡', label: 'Otomatik Çeviri', value: settings.autoTranslate ? 'Açık' : 'Kapalı', route: '/settings' },
+    { icon: '🕐', label: 'Geçmişi Kaydet', value: settings.saveHistory ? 'Açık' : 'Kapalı', route: '/settings' },
   ];
 
   return (

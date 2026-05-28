@@ -307,6 +307,10 @@ export default function TranslatorScreen() {
         onStopPress={() => voice.stopListening(sourceLang === 'auto' ? '' : sourceLang)}
         onClose={() => { voice.cancelListening(); setShowVoiceModal(false); }}
         onSettingsPress={() => router.push('/voice-settings')}
+        onLangSelect={(code) => {
+          setSourceLang(code);
+          voice.startListening(code);
+        }}
       />
     </SafeAreaView>
   );
