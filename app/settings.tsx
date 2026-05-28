@@ -1,14 +1,17 @@
 import React, { useEffect, useState } from 'react';
 import {
   View, Text, Switch, TouchableOpacity, ScrollView,
-  StyleSheet, TextInput, ActivityIndicator,
+  StyleSheet, TextInput, ActivityIndicator, Linking,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useTranslatorStore } from '../store/translatorStore';
 import { LIBRE_INSTANCES } from '../services/translate';
 import { Colors, Spacing, BorderRadius, LANGUAGES } from '../constants/theme';
+
+const OCR_KEY_STORAGE = 'lingua_ocr_api_key';
 
 type ConnStatus = 'idle' | 'testing' | 'ok' | 'error';
 
@@ -33,6 +36,7 @@ export default function SettingsScreen() {
   const [connStatus, setConnStatus] = useState<Record<string, ConnStatus>>({});
   const [customUrl, setCustomUrl] = useState('');
   const [customKey, setCustomKey] = useState('');
+  const [ocrApiKey, setOcrApiKey] = useState('');
 
   useEffect(() => {
     const isCustom = !LIBRE_INSTANCES.includes(settings.preferredInstance);
@@ -40,7 +44,13 @@ export default function SettingsScreen() {
       setCustomUrl(settings.preferredInstance);
       setCustomKey(settings.apiKey);
     }
+    AsyncStorage.getItem(OCR_KEY_STORAGE).then(v => setOcrApiKey(v || ''));
   }, []);
+
+  const saveOcrKey = async (key: string) => {
+    setOcrApiKey(key);
+    await AsyncStorage.setItem(OCR_KEY_STORAGE, key.trim());
+  };
 
   const handleTest = async (url: string) => {
     if (!url) return;
@@ -261,6 +271,31 @@ export default function SettingsScreen() {
             </View>
             <Text style={{ color: Colors.text.muted, fontSize: 22 }}>›</Text>
           </TouchableOpacity>
+        </View>
+
+        {/* OCR */}
+        <Text style={styles.sectionLabel}>GÖRSEL METİN TANIMA (OCR)</Text>
+        <View style={styles.section}>
+          <View style={styles.customBlock}>
+            <Text style={styles.customLabel}>OCR.space API Anahtarı</Text>
+            <Text style={[styles.customLabel, { fontSize: 11, color: Colors.text.muted, marginTop: 2 }]}>
+              Boş bırakılırsa ücretsiz demo key kullanılır (dakikada 1 istek). Kendi ücretsiz anahtarınız için ocr.space/ocrapi
+            </Text>
+            <TextInput
+              style={[styles.input, { marginTop: 8 }]}
+              placeholder="ocr.space API anahtarınız (K_...)"
+              placeholderTextColor={Colors.text.muted}
+              value={ocrApiKey}
+              onChangeText={saveOcrKey}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            <TouchableOpacity onPress={() => Linking.openURL('https://ocr.space/ocrapi')}>
+              <Text style={{ fontSize: 12, color: Colors.accent.primary, marginTop: 6 }}>
+                ocr.space → Ücretsiz API Anahtarı Al →
+              </Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
         {/* About */}

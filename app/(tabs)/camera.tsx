@@ -23,27 +23,47 @@ try { MediaLibrary = require('expo-media-library'); } catch {}
 
 type State = 'idle' | 'ocr' | 'translating' | 'done' | 'viewing' | 'error';
 
+const OCR_KEY_STORAGE = 'lingua_ocr_api_key';
+
+async function getOcrApiKey(): Promise<string> {
+  try {
+    const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+    const key = await AsyncStorage.getItem(OCR_KEY_STORAGE);
+    return key?.trim() || 'helloworld';
+  } catch {
+    return 'helloworld';
+  }
+}
+
 async function ocrFromBase64(base64: string): Promise<string> {
+  const apiKey = await getOcrApiKey();
   const formData = new FormData();
   formData.append('base64Image', `data:image/jpeg;base64,${base64}`);
-  formData.append('language', 'tur,eng,deu,fra,spa,jpn,chi_sim,ara,rus');
+  formData.append('language', 'tur,eng');
   formData.append('isOverlayRequired', 'false');
   formData.append('detectOrientation', 'true');
   formData.append('scale', 'true');
-  formData.append('OCREngine', '2');
+  formData.append('OCREngine', '1');
 
   const res = await fetch('https://api.ocr.space/parse/base64', {
     method: 'POST',
-    headers: { apikey: 'helloworld' },
+    headers: { apikey: apiKey },
     body: formData,
   });
-  if (!res.ok) throw new Error(`OCR sunucusu hatası (${res.status})`);
+
+  if (res.status === 429) throw new Error('OCR limit aşıldı. Ayarlar\'dan kendi API anahtarınızı girin (ocr.space ücretsiz).');
+  if (!res.ok) throw new Error(`OCR sunucusu hatası (${res.status}). Ayarlar → OCR API Anahtarı kontrol edin.`);
+
   const json = await res.json();
   if (json.IsErroredOnProcessing) {
-    throw new Error(json.ErrorMessage?.[0] || 'OCR başarısız');
+    const msg = json.ErrorMessage?.[0] || 'OCR başarısız';
+    if (msg.toLowerCase().includes('limit') || msg.toLowerCase().includes('quota')) {
+      throw new Error('OCR günlük limit doldu. Ayarlar\'dan kendi ücretsiz API anahtarınızı ekleyin.');
+    }
+    throw new Error(msg);
   }
   const text = json.ParsedResults?.[0]?.ParsedText?.trim();
-  if (!text) throw new Error('Görselde okunabilir metin bulunamadı');
+  if (!text) throw new Error('Görselde okunabilir metin bulunamadı. Daha iyi aydınlatılmış bir fotoğraf deneyin.');
   return text;
 }
 
@@ -68,8 +88,8 @@ export default function CameraScreen() {
       setState('ocr');
       const manip = await ImageManipulator.manipulateAsync(
         uri,
-        [{ resize: { width: 1000 } }],
-        { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG, base64: true },
+        [{ resize: { width: 600 } }],
+        { compress: 0.5, format: ImageManipulator.SaveFormat.JPEG, base64: true },
       );
       if (!manip.base64) throw new Error('Görsel işlenemedi');
 
