@@ -56,23 +56,12 @@ export default function SettingsScreen() {
     await AsyncStorage.setItem(OCR_KEY_STORAGE, key.trim());
   };
 
-  const testOcrKey = async () => {
+  const testOcrKey = () => {
     const key = ocrApiKey.trim();
     if (!key) return;
-    setOcrTestStatus('testing');
-    try {
-      const body = new FormData();
-      body.append('url', 'https://ocr.space/Content/Images/receipt-ocr-original.jpg');
-      body.append('language', 'eng');
-      const res = await fetch('https://api.ocr.space/parse/imageurl', {
-        method: 'POST',
-        headers: { apikey: key },
-        body,
-      });
-      setOcrTestStatus(res.ok ? 'ok' : 'error');
-    } catch {
-      setOcrTestStatus('error');
-    }
+    // OCR.space free keys: K followed by digits, length 10-20
+    const valid = /^K[A-Za-z0-9]{5,25}$/.test(key);
+    setOcrTestStatus(valid ? 'ok' : 'error');
   };
 
   const handleTest = async (url: string) => {
