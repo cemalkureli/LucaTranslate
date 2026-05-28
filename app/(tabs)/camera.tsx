@@ -45,7 +45,7 @@ async function ocrFromBase64(base64: string): Promise<string> {
   formData.append('scale', 'true');
   formData.append('OCREngine', '1');
 
-  const res = await fetch('https://api.ocr.space/parse/base64', {
+  const res = await fetch('https://api.ocr.space/parse/image', {
     method: 'POST',
     headers: { apikey: apiKey },
     body: formData,

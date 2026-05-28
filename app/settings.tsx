@@ -56,12 +56,31 @@ export default function SettingsScreen() {
     await AsyncStorage.setItem(OCR_KEY_STORAGE, key.trim());
   };
 
-  const testOcrKey = () => {
+  const testOcrKey = async () => {
     const key = ocrApiKey.trim();
     if (!key) return;
-    // OCR.space free keys: K followed by digits, length 10-20
-    const valid = /^K[A-Za-z0-9]{5,25}$/.test(key);
-    setOcrTestStatus(valid ? 'ok' : 'error');
+    setOcrTestStatus('testing');
+    try {
+      // 1x1 white PNG — just to validate the API key
+      const tiny = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwADhQGAWjR9awAAAABJRU5ErkJggg==';
+      const body = new FormData();
+      body.append('base64Image', `data:image/png;base64,${tiny}`);
+      body.append('language', 'eng');
+      body.append('OCREngine', '1');
+      const res = await fetch('https://api.ocr.space/parse/image', {
+        method: 'POST',
+        headers: { apikey: key },
+        body,
+      });
+      const json = await res.json().catch(() => ({}));
+      const isInvalid = res.status === 403
+        || json?.OCRExitCode === 99
+        || (json?.ErrorMessage?.[0] || '').toLowerCase().includes('invalid')
+        || (json?.ErrorMessage?.[0] || '').toLowerCase().includes('api key');
+      setOcrTestStatus(isInvalid ? 'error' : 'ok');
+    } catch {
+      setOcrTestStatus('error');
+    }
   };
 
   const handleTest = async (url: string) => {
