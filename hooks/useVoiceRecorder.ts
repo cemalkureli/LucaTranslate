@@ -98,7 +98,7 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
     clearSilenceTimer();
     silenceTimerRef.current = setTimeout(() => {
       if (voiceActiveRef.current) stopFn();
-    }, 3000);
+    }, 6000);
   };
 
   // Setup Voice listeners
@@ -229,7 +229,13 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
 
     setState('requesting');
     try {
-      await Voice.start(toLocale(lang));
+      // EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: wait 5s of silence before stopping
+      // EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS: wait 5s when possibly done
+      await Voice.start(toLocale(lang), {
+        EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 5000,
+        EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS: 5000,
+        EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS: 1500,
+      });
       voiceActiveRef.current = true;
       setState('recording');
     } catch (err: any) {
