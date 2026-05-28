@@ -1,6 +1,6 @@
 import React, { useEffect } from 'react';
 import {
-  View, Text, StyleSheet, Modal, TouchableOpacity, Pressable,
+  View, Text, StyleSheet, Modal, TouchableOpacity, Pressable, ScrollView,
 } from 'react-native';
 import Animated, {
   useSharedValue, useAnimatedStyle, withRepeat, withTiming,
@@ -79,19 +79,6 @@ function EngineHint() {
   return <Text style={styles.engineHint}>Motor: {engine}</Text>;
 }
 
-const QUICK_LANGS = [
-  { code: 'tr', flag: '🇹🇷', name: 'TR' },
-  { code: 'en', flag: '🇬🇧', name: 'EN' },
-  { code: 'de', flag: '🇩🇪', name: 'DE' },
-  { code: 'fr', flag: '🇫🇷', name: 'FR' },
-  { code: 'ar', flag: '🇸🇦', name: 'AR' },
-  { code: 'ru', flag: '🇷🇺', name: 'RU' },
-  { code: 'zh', flag: '🇨🇳', name: 'ZH' },
-  { code: 'ja', flag: '🇯🇵', name: 'JA' },
-  { code: 'ko', flag: '🇰🇷', name: 'KO' },
-  { code: 'es', flag: '🇪🇸', name: 'ES' },
-];
-
 export default function VoiceModal({
   visible, state, sourceLang, partialText = '',
   onStartPress, onStopPress, onClose, onSettingsPress, onLangSelect,
@@ -159,92 +146,99 @@ export default function VoiceModal({
             </TouchableOpacity>
           </View>
 
-          {/* Quick lang selector — shown when auto-detect is active */}
-          {sourceLang === 'auto' && !isRecording && !isProcessing && (
-            <View style={styles.quickLangs}>
-              <Text style={styles.quickLangsHint}>Dil seç → konuş:</Text>
-              <View style={styles.quickLangRow}>
-                {QUICK_LANGS.map(l => (
+          {/* Auto mode: show full language picker, hide mic */}
+          {sourceLang === 'auto' && !isRecording && !isProcessing ? (
+            <View style={styles.autoLangPicker}>
+              <Text style={styles.autoLangTitle}>Konuşma dilinizi seçin</Text>
+              <ScrollView
+                style={styles.langScroll}
+                contentContainerStyle={styles.langScrollContent}
+                showsVerticalScrollIndicator={false}
+              >
+                {LANGUAGES.filter(l => l.code !== 'auto').map(l => (
                   <TouchableOpacity
                     key={l.code}
-                    style={styles.quickLangBtn}
+                    style={styles.langChip}
                     onPress={() => onLangSelect?.(l.code)}
+                    activeOpacity={0.7}
                   >
-                    <Text style={styles.quickLangFlag}>{l.flag}</Text>
-                    <Text style={styles.quickLangCode}>{l.name}</Text>
+                    <Text style={styles.langChipFlag}>{l.flag}</Text>
+                    <Text style={styles.langChipName}>{l.nativeName}</Text>
                   </TouchableOpacity>
                 ))}
+              </ScrollView>
+            </View>
+          ) : (
+            <>
+              {/* Waveform visualizer */}
+              <View style={styles.waveformOuter}>
+                <View style={styles.waveform}>
+                  {Array.from({ length: BAR_COUNT }, (_, i) => (
+                    <WaveBar
+                      key={i}
+                      index={i}
+                      isRecording={isRecording}
+                      isProcessing={isProcessing}
+                    />
+                  ))}
+                </View>
               </View>
-            </View>
+
+              {/* Live transcript */}
+              <View style={styles.transcriptBox}>
+                {partialText ? (
+                  <Text style={styles.partialText} numberOfLines={3}>"{partialText}"</Text>
+                ) : isRecording ? (
+                  <Text style={styles.listeningText}>🎙 Sizi dinliyorum...</Text>
+                ) : isProcessing ? (
+                  <Text style={styles.processingText}>⋯ İşleniyor...</Text>
+                ) : (
+                  <Text style={styles.idleText}>Ses girişi bekleniyor</Text>
+                )}
+              </View>
+
+              {/* Big mic button */}
+              <View style={styles.btnArea}>
+                {(isRecording || isProcessing) && (
+                  <Animated.View style={[
+                    styles.glowRing,
+                    glowStyle,
+                    { backgroundColor: isProcessing ? Colors.accent.cyan : '#F472B6' },
+                  ]} />
+                )}
+                <Animated.View style={btnStyle}>
+                  <Pressable
+                    onPressIn={() => {
+                      btnScale.value = withSpring(0.88, { damping: 10 });
+                      if (!isRecording && !isProcessing) onStartPress();
+                    }}
+                    onPressOut={() => {
+                      btnScale.value = withSpring(1, { damping: 10 });
+                      if (isRecording) onStopPress();
+                    }}
+                    style={styles.micBtn}
+                  >
+                    <LinearGradient
+                      colors={
+                        isProcessing ? [Colors.accent.cyan, '#0891B2']
+                        : isRecording ? ['#F472B6', '#BE185D']
+                        : [Colors.accent.primary, Colors.accent.secondary]
+                      }
+                      style={styles.micGrad}
+                      start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
+                    >
+                      {isProcessing
+                        ? <Text style={{ fontSize: 32, color: '#fff' }}>⋯</Text>
+                        : isRecording
+                        ? <StopIcon size={38} color="#fff" />
+                        : <MicIcon size={38} color="#fff" strokeWidth={1.8} />
+                      }
+                    </LinearGradient>
+                  </Pressable>
+                </Animated.View>
+              </View>
+            </>
           )}
-
-          {/* Waveform visualizer */}
-          <View style={styles.waveformOuter}>
-            <View style={styles.waveform}>
-              {Array.from({ length: BAR_COUNT }, (_, i) => (
-                <WaveBar
-                  key={i}
-                  index={i}
-                  isRecording={isRecording}
-                  isProcessing={isProcessing}
-                />
-              ))}
-            </View>
-          </View>
-
-          {/* Live transcript */}
-          <View style={styles.transcriptBox}>
-            {partialText ? (
-              <Text style={styles.partialText} numberOfLines={3}>"{partialText}"</Text>
-            ) : isRecording ? (
-              <Text style={styles.listeningText}>🎙 Sizi dinliyorum...</Text>
-            ) : isProcessing ? (
-              <Text style={styles.processingText}>⋯ İşleniyor...</Text>
-            ) : (
-              <Text style={styles.idleText}>Ses girişi bekleniyor</Text>
-            )}
-          </View>
-
-          {/* Big mic button */}
-          <View style={styles.btnArea}>
-            {(isRecording || isProcessing) && (
-              <Animated.View style={[
-                styles.glowRing,
-                glowStyle,
-                { backgroundColor: isProcessing ? Colors.accent.cyan : '#F472B6' },
-              ]} />
-            )}
-            <Animated.View style={btnStyle}>
-              <Pressable
-                onPressIn={() => {
-                  btnScale.value = withSpring(0.88, { damping: 10 });
-                  if (!isRecording && !isProcessing) onStartPress();
-                }}
-                onPressOut={() => {
-                  btnScale.value = withSpring(1, { damping: 10 });
-                  if (isRecording) onStopPress();
-                }}
-                style={styles.micBtn}
-              >
-                <LinearGradient
-                  colors={
-                    isProcessing ? [Colors.accent.cyan, '#0891B2']
-                    : isRecording ? ['#F472B6', '#BE185D']
-                    : [Colors.accent.primary, Colors.accent.secondary]
-                  }
-                  style={styles.micGrad}
-                  start={{ x: 0, y: 0 }} end={{ x: 1, y: 1 }}
-                >
-                  {isProcessing
-                    ? <Text style={{ fontSize: 32, color: '#fff' }}>⋯</Text>
-                    : isRecording
-                    ? <StopIcon size={38} color="#fff" />
-                    : <MicIcon size={38} color="#fff" strokeWidth={1.8} />
-                  }
-                </LinearGradient>
-              </Pressable>
-            </Animated.View>
-          </View>
 
           {/* State text */}
           <Text style={[
@@ -372,21 +366,24 @@ const styles = StyleSheet.create({
   },
   settingsBtnText: { color: Colors.accent.primary, fontWeight: '600', fontSize: 13 },
 
-  // Quick lang selector
-  quickLangs: {
-    paddingHorizontal: 16, paddingBottom: 8,
+  // Auto lang picker
+  autoLangPicker: {
+    paddingHorizontal: 16, paddingBottom: 8, flex: 1,
   },
-  quickLangsHint: {
-    fontSize: 11, color: Colors.text.muted, textAlign: 'center', marginBottom: 8,
+  autoLangTitle: {
+    fontSize: 13, color: Colors.text.muted, textAlign: 'center',
+    marginBottom: 10, fontWeight: '600',
   },
-  quickLangRow: {
-    flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 6,
+  langScroll: { maxHeight: 220 },
+  langScrollContent: {
+    flexDirection: 'row', flexWrap: 'wrap', gap: 6, justifyContent: 'center',
   },
-  quickLangBtn: {
-    alignItems: 'center', backgroundColor: Colors.bg.card,
-    borderRadius: 10, borderWidth: 1, borderColor: Colors.bg.cardBorder,
-    paddingHorizontal: 10, paddingVertical: 6, gap: 2,
+  langChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    backgroundColor: Colors.bg.card, borderRadius: 20,
+    borderWidth: 1, borderColor: Colors.bg.cardBorder,
+    paddingHorizontal: 10, paddingVertical: 6,
   },
-  quickLangFlag: { fontSize: 16 },
-  quickLangCode: { fontSize: 10, color: Colors.text.muted, fontWeight: '600' },
+  langChipFlag: { fontSize: 15 },
+  langChipName: { fontSize: 12, color: Colors.text.primary, fontWeight: '500' },
 });
