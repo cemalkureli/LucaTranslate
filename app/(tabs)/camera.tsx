@@ -81,6 +81,9 @@ export default function CameraScreen() {
   const liveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const liveBusyRef = useRef(false);
   const translationCache = useRef<Map<string, string>>(new Map());
+  // Refs to avoid stale closures in setInterval
+  const liveDetectedRef = useRef('');
+  const localTargetLangRef = useRef('en');
   const visionDevice = useCameraDevice('back');
   const { hasPermission: hasCamPerm, requestPermission: requestCamPerm } = useCameraPermission();
   // Keep expo-camera permission for ImagePicker fallback (photo/gallery)
@@ -99,27 +102,33 @@ export default function CameraScreen() {
     return tr;
   }, [settings]);
 
+  // Keep refs in sync — avoids stale closures in setInterval
+  useEffect(() => { localTargetLangRef.current = localTargetLang; }, [localTargetLang]);
+
   // ── Live scan: ML Kit on-device OCR + translate ──────────────────────────
+  // Uses refs so the interval callback is never stale
   const runLiveScan = useCallback(async () => {
     if (!visionCameraRef.current || liveBusyRef.current) return;
     liveBusyRef.current = true;
     setLiveStatus('scanning');
     try {
-      // takeSnapshot: preview stays smooth, no shutter, no interruption
       const snapshot = await visionCameraRef.current.takeSnapshot({
         quality: 20,
         skipMetadata: true,
       });
       const uri = `file://${snapshot.path}`;
-
-      // On-device ML Kit — no internet needed for text detection
       const mlResult = await TextRecognition.recognize(uri, TextRecognitionScript.LATIN);
       const text = mlResult.text?.trim();
-      if (!text || text === liveDetected) return;
 
+      // Use ref for deduplication — no stale closure
+      if (!text || text === liveDetectedRef.current) return;
+
+      liveDetectedRef.current = text;
       setLiveDetected(text);
       setLiveStatus('translating');
-      const tr = await doTranslate(text, localTargetLang);
+
+      // Use ref for current language — always up-to-date
+      const tr = await doTranslate(text, localTargetLangRef.current);
       setLiveTranslation(tr);
     } catch {
       // silent
@@ -127,26 +136,30 @@ export default function CameraScreen() {
       setLiveStatus('idle');
       liveBusyRef.current = false;
     }
-  }, [liveDetected, localTargetLang, doTranslate]);
+  }, [doTranslate]); // stable deps only
 
   useEffect(() => {
     if (!liveScan) {
       if (liveTimerRef.current) clearInterval(liveTimerRef.current);
+      liveDetectedRef.current = '';
       setLiveDetected('');
       setLiveTranslation('');
       return;
     }
     liveBusyRef.current = false;
+    liveDetectedRef.current = '';
     runLiveScan();
     liveTimerRef.current = setInterval(runLiveScan, 2500);
     return () => { if (liveTimerRef.current) clearInterval(liveTimerRef.current); };
-  }, [liveScan]);
+  }, [liveScan, runLiveScan]);
 
-  // Re-translate when language changes
+  // Re-translate when language changes — clear cache and detected text
   useEffect(() => {
-    if (liveScan && liveDetected) {
-      doTranslate(liveDetected, localTargetLang).then(setLiveTranslation).catch(() => {});
-    }
+    if (!liveScan) return;
+    translationCache.current.clear();
+    liveDetectedRef.current = '';
+    setLiveDetected('');
+    setLiveTranslation('');
   }, [localTargetLang]);
 
   const startLiveScan = async () => {
