@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import {
   View, Text, Switch, TouchableOpacity, ScrollView,
-  StyleSheet, TextInput, ActivityIndicator, Linking,
+  StyleSheet, TextInput, ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -37,6 +37,7 @@ export default function SettingsScreen() {
   const [customUrl, setCustomUrl] = useState('');
   const [customKey, setCustomKey] = useState('');
   const [ocrApiKey, setOcrApiKey] = useState('');
+  const [ocrTestStatus, setOcrTestStatus] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle');
 
   useEffect(() => {
     const isCustom = !LIBRE_INSTANCES.includes(settings.preferredInstance);
@@ -44,12 +45,34 @@ export default function SettingsScreen() {
       setCustomUrl(settings.preferredInstance);
       setCustomKey(settings.apiKey);
     }
-    AsyncStorage.getItem(OCR_KEY_STORAGE).then(v => setOcrApiKey(v || ''));
+    AsyncStorage.getItem(OCR_KEY_STORAGE).then(v => {
+      if (v) { setOcrApiKey(v); setOcrTestStatus('ok'); }
+    });
   }, []);
 
   const saveOcrKey = async (key: string) => {
     setOcrApiKey(key);
+    setOcrTestStatus('idle');
     await AsyncStorage.setItem(OCR_KEY_STORAGE, key.trim());
+  };
+
+  const testOcrKey = async () => {
+    const key = ocrApiKey.trim();
+    if (!key) return;
+    setOcrTestStatus('testing');
+    try {
+      const body = new FormData();
+      body.append('url', 'https://ocr.space/Content/Images/receipt-ocr-original.jpg');
+      body.append('language', 'eng');
+      const res = await fetch('https://api.ocr.space/parse/imageurl', {
+        method: 'POST',
+        headers: { apikey: key },
+        body,
+      });
+      setOcrTestStatus(res.ok ? 'ok' : 'error');
+    } catch {
+      setOcrTestStatus('error');
+    }
   };
 
   const handleTest = async (url: string) => {
@@ -215,23 +238,6 @@ export default function SettingsScreen() {
           </View>
         </View>
 
-        {/* API Key for official server */}
-        <Text style={styles.sectionLabel}>API ANAHTARI (RESMİ SUNUCU)</Text>
-        <View style={styles.section}>
-          <View style={styles.customBlock}>
-            <Text style={styles.customLabel}>libretranslate.com API Anahtarı</Text>
-            <TextInput
-              style={[styles.input, { marginTop: 6 }]}
-              placeholder="Boş bırakılabilir (ücretsiz plan)"
-              placeholderTextColor={Colors.text.muted}
-              value={!isCustomSelected ? settings.apiKey : ''}
-              onChangeText={(v) => { if (!isCustomSelected) updateSettings({ apiKey: v }); }}
-              secureTextEntry
-              autoCapitalize="none"
-            />
-          </View>
-        </View>
-
         {/* Defaults */}
         <Text style={styles.sectionLabel}>VARSAYILAN DİL</Text>
         <View style={styles.section}>
@@ -277,24 +283,34 @@ export default function SettingsScreen() {
         <Text style={styles.sectionLabel}>GÖRSEL METİN TANIMA (OCR)</Text>
         <View style={styles.section}>
           <View style={styles.customBlock}>
-            <Text style={styles.customLabel}>OCR.space API Anahtarı</Text>
-            <Text style={[styles.customLabel, { fontSize: 11, color: Colors.text.muted, marginTop: 2 }]}>
-              Boş bırakılırsa ücretsiz demo key kullanılır (dakikada 1 istek). Kendi ücretsiz anahtarınız için ocr.space/ocrapi
-            </Text>
-            <TextInput
-              style={[styles.input, { marginTop: 8 }]}
-              placeholder="ocr.space API anahtarınız (K_...)"
-              placeholderTextColor={Colors.text.muted}
-              value={ocrApiKey}
-              onChangeText={saveOcrKey}
-              autoCapitalize="none"
-              autoCorrect={false}
-            />
-            <TouchableOpacity onPress={() => Linking.openURL('https://ocr.space/ocrapi')}>
-              <Text style={{ fontSize: 12, color: Colors.accent.primary, marginTop: 6 }}>
-                ocr.space → Ücretsiz API Anahtarı Al →
-              </Text>
-            </TouchableOpacity>
+            <Text style={styles.customLabel}>OCR API Anahtarı</Text>
+            <View style={{ flexDirection: 'row', gap: 8, marginTop: 6 }}>
+              <TextInput
+                style={[styles.input, { flex: 1 }]}
+                placeholder="K_..."
+                placeholderTextColor={Colors.text.muted}
+                value={ocrApiKey}
+                onChangeText={saveOcrKey}
+                onSubmitEditing={testOcrKey}
+                returnKeyType="done"
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+              <TouchableOpacity
+                style={styles.testBtn}
+                onPress={testOcrKey}
+                disabled={!ocrApiKey || ocrTestStatus === 'testing'}
+              >
+                {ocrTestStatus === 'testing'
+                  ? <ActivityIndicator size="small" color={Colors.accent.cyan} />
+                  : <Text style={styles.testBtnText}>
+                      {ocrTestStatus === 'ok' ? '✓' : ocrTestStatus === 'error' ? '✕' : 'Test'}
+                    </Text>
+                }
+              </TouchableOpacity>
+            </View>
+            {ocrTestStatus === 'ok' && <Text style={[styles.statusDot, { color: Colors.accent.emerald, marginTop: 4 }]}>● Bağlandı</Text>}
+            {ocrTestStatus === 'error' && <Text style={[styles.statusDot, { color: Colors.accent.pink, marginTop: 4 }]}>● Geçersiz anahtar</Text>}
           </View>
         </View>
 
