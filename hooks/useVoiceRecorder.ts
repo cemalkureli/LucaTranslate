@@ -84,16 +84,36 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
   const [partialText, setPartialText] = useState('');
   const recordingRef = useRef<Audio.Recording | null>(null);
   const voiceActiveRef = useRef(false);
+  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearSilenceTimer = () => {
+    if (silenceTimerRef.current) {
+      clearTimeout(silenceTimerRef.current);
+      silenceTimerRef.current = null;
+    }
+  };
+
+  const startSilenceTimer = (stopFn: () => void) => {
+    clearSilenceTimer();
+    silenceTimerRef.current = setTimeout(() => {
+      if (voiceActiveRef.current) stopFn();
+    }, 3000);
+  };
 
   // Setup Voice listeners
   useEffect(() => {
     if (!Voice) return;
 
-    Voice.onSpeechStart = () => setState('recording');
+    Voice.onSpeechStart = () => {
+      setState('recording');
+      startSilenceTimer(() => Voice.stop().catch(() => {}));
+    };
     Voice.onSpeechEnd = () => {
+      clearSilenceTimer();
       if (voiceActiveRef.current) setState('processing');
     };
     Voice.onSpeechResults = (e: any) => {
+      clearSilenceTimer();
       const text = e.value?.[0]?.trim();
       if (text) {
         opts.onTranscript(text);
@@ -107,6 +127,8 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
       if (text) {
         setPartialText(text);
         opts.onPartial?.(text);
+        // Reset 3s silence timer on each new partial result
+        startSilenceTimer(() => Voice.stop().catch(() => {}));
       }
     };
     Voice.onSpeechError = (e: any) => {
@@ -243,6 +265,7 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
   }, [state, opts]);
 
   const cancelListening = useCallback(async () => {
+    clearSilenceTimer();
     if (Voice) {
       try { await Voice.cancel(); } catch {}
     }
