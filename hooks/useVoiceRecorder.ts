@@ -57,6 +57,7 @@ const VOICE_LOCALE: Record<string, string> = {
 };
 
 function toLocale(code: string): string {
+  if (!code) return ''; // auto-detect: SpeechRecognizer uses device default
   if (code.includes('-')) return code;
   return VOICE_LOCALE[code] ?? code;
 }
@@ -132,12 +133,25 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
       }
     };
     Voice.onSpeechError = (e: any) => {
-      const msg = e.error?.message || 'Voice error';
-      // Ignore "recognition stopped" errors (user stopped manually)
-      if (msg.includes('7') || msg.includes('No match')) {
+      const msg = e.error?.message || '';
+      const code = e.error?.code || '';
+      // Ignore "no match" / user-stopped errors
+      if (msg.includes('7') || msg.includes('No match') || code === '7') {
         setState('idle');
+      } else if (
+        msg.includes('9') || code === '9' || // INSUFFICIENT_PERMISSIONS
+        msg.includes('13') || code === '13' || // LANGUAGE_NOT_SUPPORTED
+        msg.includes('11') || code === '11' || // LANGUAGE_NOT_AVAILABLE
+        msg.toLowerCase().includes('language') ||
+        msg.toLowerCase().includes('not support')
+      ) {
+        opts.onError?.(
+          'Bu dil Web Speech ile desteklenmiyor.\nAyarlar → Ses Tanıma → OpenAI Whisper seçin.'
+        );
+        setState('error');
+        setTimeout(() => setState('idle'), 4000);
       } else {
-        opts.onError?.(msg);
+        opts.onError?.(msg || 'Ses tanıma hatası.');
         setState('error');
         setTimeout(() => setState('idle'), 3000);
       }
@@ -149,7 +163,7 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
     };
   }, []);
 
-  const startListening = useCallback(async (lang: string = 'en') => {
+  const startListening = useCallback(async (lang: string = '') => {
     if (state !== 'idle') return;
 
     const voiceSettings = await getVoiceSettings();

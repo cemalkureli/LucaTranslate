@@ -8,6 +8,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import { Camera as VisionCamera, useCameraDevice, useCameraPermission } from 'react-native-vision-camera';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import TextRecognition, { TextRecognitionScript } from '@react-native-ml-kit/text-recognition';
 import { Colors, Spacing, BorderRadius, LANGUAGES } from '../../constants/theme';
@@ -71,16 +72,19 @@ export default function CameraScreen() {
   const [resultTranslation, setResultTranslation] = useState('');
   const [isTranslatingResult, setIsTranslatingResult] = useState(false);
 
-  // Live scan
+  // Live scan — VisionCamera (no preview interruption)
   const [liveScan, setLiveScan] = useState(false);
-  const [liveDetected, setLiveDetected] = useState('');      // raw detected text
-  const [liveTranslation, setLiveTranslation] = useState(''); // translated
+  const [liveDetected, setLiveDetected] = useState('');
+  const [liveTranslation, setLiveTranslation] = useState('');
   const [liveStatus, setLiveStatus] = useState<'idle' | 'scanning' | 'translating'>('idle');
-  const cameraRef = useRef<CameraView>(null);
+  const visionCameraRef = useRef<VisionCamera>(null);
   const liveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const liveBusyRef = useRef(false);
   const translationCache = useRef<Map<string, string>>(new Map());
-  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
+  const visionDevice = useCameraDevice('back');
+  const { hasPermission: hasCamPerm, requestPermission: requestCamPerm } = useCameraPermission();
+  // Keep expo-camera permission for ImagePicker fallback (photo/gallery)
+  const [, requestCameraPermission] = useCameraPermissions();
 
   const doTranslate = useCallback(async (text: string, lang: string): Promise<string> => {
     const key = `${text}||${lang}`;
@@ -97,17 +101,19 @@ export default function CameraScreen() {
 
   // ── Live scan: ML Kit on-device OCR + translate ──────────────────────────
   const runLiveScan = useCallback(async () => {
-    if (!cameraRef.current || liveBusyRef.current) return;
+    if (!visionCameraRef.current || liveBusyRef.current) return;
     liveBusyRef.current = true;
     setLiveStatus('scanning');
     try {
-      const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.3, base64: false, shutterSound: false, skipProcessing: true,
-      } as any);
-      if (!photo?.uri) return;
+      // takeSnapshot: preview stays smooth, no shutter, no interruption
+      const snapshot = await visionCameraRef.current.takeSnapshot({
+        quality: 20,
+        skipMetadata: true,
+      });
+      const uri = `file://${snapshot.path}`;
 
-      // On-device recognition — no internet needed
-      const mlResult = await TextRecognition.recognize(photo.uri, TextRecognitionScript.LATIN);
+      // On-device ML Kit — no internet needed for text detection
+      const mlResult = await TextRecognition.recognize(uri, TextRecognitionScript.LATIN);
       const text = mlResult.text?.trim();
       if (!text || text === liveDetected) return;
 
@@ -144,10 +150,11 @@ export default function CameraScreen() {
   }, [localTargetLang]);
 
   const startLiveScan = async () => {
-    if (!cameraPermission?.granted) {
-      const { granted } = await requestCameraPermission();
+    if (!hasCamPerm) {
+      const granted = await requestCamPerm();
       if (!granted) { Alert.alert('İzin Gerekli', 'Kamera izni gerekiyor.'); return; }
     }
+    if (!visionDevice) { Alert.alert('Hata', 'Kamera bulunamadı.'); return; }
     translationCache.current.clear();
     setLocalTargetLang('en');
     setLiveDetected('');
@@ -245,11 +252,17 @@ export default function CameraScreen() {
   ) : null;
 
   // ── Live Scan Screen ──────────────────────────────────────────────────────
-  if (liveScan) {
+  if (liveScan && visionDevice) {
     return (
       <View style={styles.liveContainer}>
-        {/* Live camera */}
-        <CameraView ref={cameraRef} style={StyleSheet.absoluteFillObject} facing="back" />
+        {/* VisionCamera: preview never interrupted by snapshot */}
+        <VisionCamera
+          ref={visionCameraRef}
+          style={StyleSheet.absoluteFillObject}
+          device={visionDevice}
+          isActive={liveScan}
+          photo={true}
+        />
 
         {/* Top bar */}
         <SafeAreaView edges={['top']} style={styles.liveTop}>

@@ -303,8 +303,8 @@ export default function TranslatorScreen() {
         state={voice.state}
         sourceLang={sourceLang}
         partialText={voice.partialText}
-        onStartPress={() => voice.startListening(sourceLang === 'auto' ? 'tr' : sourceLang)}
-        onStopPress={() => voice.stopListening(sourceLang === 'auto' ? 'tr' : sourceLang)}
+        onStartPress={() => voice.startListening(sourceLang === 'auto' ? '' : sourceLang)}
+        onStopPress={() => voice.stopListening(sourceLang === 'auto' ? '' : sourceLang)}
         onClose={() => { voice.cancelListening(); setShowVoiceModal(false); }}
         onSettingsPress={() => router.push('/voice-settings')}
       />

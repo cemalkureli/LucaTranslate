@@ -44,6 +44,13 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
         cameraPermission: 'Allow LucaTranslate to access your camera.',
         photosPermission: 'Allow LucaTranslate to access your photos.'
       }
+    ],
+    [
+      'react-native-vision-camera',
+      {
+        cameraPermissionText: 'LucaTranslate kamera erişimi istiyor.',
+        enableFrameProcessors: false
+      }
     ]
   ],
   scheme: 'lingua',
