@@ -86,6 +86,8 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
   const recordingRef = useRef<Audio.Recording | null>(null);
   const voiceActiveRef = useRef(false);
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const accumulatedTextRef = useRef('');  // biriktirilen tüm cümleler
+  const currentLangRef = useRef('');      // yeniden başlatma için dil
 
   const clearSilenceTimer = () => {
     if (silenceTimerRef.current) {
@@ -116,12 +118,23 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
     Voice.onSpeechResults = (e: any) => {
       clearSilenceTimer();
       const text = e.value?.[0]?.trim();
-      if (text) {
-        opts.onTranscript(text);
+      if (!text) return;
+
+      if (voiceActiveRef.current) {
+        // Buton hâlâ basılı → biriktir ve yeniden başlat
+        accumulatedTextRef.current = (accumulatedTextRef.current + ' ' + text).trim();
+        setPartialText(accumulatedTextRef.current);
+        // Yeni cümle için yeniden başlat
+        Voice.start(toLocale(currentLangRef.current)).catch(() => {});
+        setState('recording');
+      } else {
+        // Buton bırakıldı → son segment + tümünü gönder
+        const finalText = (accumulatedTextRef.current + ' ' + text).trim();
+        if (finalText) opts.onTranscript(finalText);
+        accumulatedTextRef.current = '';
         setPartialText('');
+        setState('idle');
       }
-      setState('idle');
-      voiceActiveRef.current = false;
     };
     Voice.onSpeechPartialResults = (e: any) => {
       const text = e.value?.[0]?.trim();
@@ -227,15 +240,11 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
       return;
     }
 
+    currentLangRef.current = lang;
+    accumulatedTextRef.current = '';
     setState('requesting');
     try {
-      // EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: wait 5s of silence before stopping
-      // EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS: wait 5s when possibly done
-      await Voice.start(toLocale(lang), {
-        EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 5000,
-        EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS: 5000,
-        EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS: 1500,
-      });
+      await Voice.start(toLocale(lang));
       voiceActiveRef.current = true;
       setState('recording');
     } catch (err: any) {
@@ -286,6 +295,7 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
 
   const cancelListening = useCallback(async () => {
     clearSilenceTimer();
+    accumulatedTextRef.current = '';
     if (Voice) {
       try { await Voice.cancel(); } catch {}
     }
