@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, FlatList,
-  ActivityIndicator, Image, Alert, ScrollView,
+  ActivityIndicator, Image, Alert, ScrollView, Dimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -10,6 +10,7 @@ import * as ImageManipulator from 'expo-image-manipulator';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import TextRecognition, { TextRecognitionScript } from '@react-native-ml-kit/text-recognition';
 import { Colors, Spacing, BorderRadius, LANGUAGES } from '../../constants/theme';
 import { useTranslatorStore } from '../../store/translatorStore';
 import { useOcrHistoryStore, OcrHistoryItem } from '../../store/ocrHistoryStore';
@@ -24,8 +25,11 @@ let MediaLibrary: any = null;
 try { MediaLibrary = require('expo-media-library'); } catch {}
 
 const OCR_KEY_STORAGE = 'lingua_ocr_api_key';
-type State = 'idle' | 'ocr' | 'translating' | 'done' | 'viewing' | 'error';
+const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
 
+type State = 'idle' | 'ocr' | 'translating' | 'done' | 'viewing';
+
+// ── OCR.space (for photo/gallery mode) ──────────────────────────────────────
 async function getOcrApiKey(): Promise<string> {
   try {
     const key = await AsyncStorage.getItem(OCR_KEY_STORAGE);
@@ -55,6 +59,17 @@ async function ocrFromBase64(base64: string): Promise<string> {
   return text;
 }
 
+// ── Overlay block type ───────────────────────────────────────────────────────
+interface OverlayBlock {
+  id: string;
+  original: string;
+  translation: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export default function CameraScreen() {
   const router = useRouter();
   const [state, setState] = useState<State>('idle');
@@ -62,84 +77,113 @@ export default function CameraScreen() {
   const [viewingItem, setViewingItem] = useState<OcrHistoryItem | null>(null);
   const [showLangPicker, setShowLangPicker] = useState(false);
 
-  // Local target language for camera (independent from main screen)
   const { settings } = useTranslatorStore();
   const globalTargetLang = useTranslatorStore(s => s.targetLang);
   const [localTargetLang, setLocalTargetLang] = useState(globalTargetLang);
   const { items: history, addItem, removeItem } = useOcrHistoryStore();
 
-  // Result state for photo/gallery
+  // Photo/gallery result
   const [resultText, setResultText] = useState('');
   const [resultTranslation, setResultTranslation] = useState('');
-  const [resultImageUri, setResultImageUri] = useState('');
   const [isTranslatingResult, setIsTranslatingResult] = useState(false);
 
-  // Live scan
+  // Live AR scan
   const [liveScan, setLiveScan] = useState(false);
-  const [liveText, setLiveText] = useState('');
-  const [liveTranslation, setLiveTranslation] = useState('');
-  const [liveStatus, setLiveStatus] = useState<'idle' | 'scanning' | 'translating'>('idle');
+  const [overlayBlocks, setOverlayBlocks] = useState<OverlayBlock[]>([]);
+  const [liveStatus, setLiveStatus] = useState<'idle' | 'scanning'>('idle');
   const cameraRef = useRef<CameraView>(null);
   const liveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const liveBusyRef = useRef(false);
+  const translationCache = useRef<Map<string, string>>(new Map());
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
 
-  // ── Translate helpers ───────────────────────────────────────────────────────
+  // ── Translate helper ───────────────────────────────────────────────────────
   const doTranslate = useCallback(async (text: string, targetLang: string): Promise<string> => {
+    const cached = translationCache.current.get(`${text}||${targetLang}`);
+    if (cached) return cached;
     const result = await translate(
       { q: text, source: 'auto', target: targetLang },
       { preferredInstance: settings.preferredInstance, apiKey: settings.apiKey },
     );
-    return result.translatedText || '';
+    const tr = result.translatedText || '';
+    if (tr) translationCache.current.set(`${text}||${targetLang}`, tr);
+    return tr;
   }, [settings]);
 
-  // ── Live scan ───────────────────────────────────────────────────────────────
-  const runLiveCapture = useCallback(async () => {
+  // ── Live AR scan ───────────────────────────────────────────────────────────
+  const runLiveScan = useCallback(async () => {
     if (!cameraRef.current || liveBusyRef.current) return;
     liveBusyRef.current = true;
     setLiveStatus('scanning');
+
     try {
+      // Capture frame silently
       const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.3,
+        quality: 0.25,
         base64: false,
         shutterSound: false,
+        skipProcessing: true,
       } as any);
       if (!photo?.uri) return;
-      const manip = await ImageManipulator.manipulateAsync(
-        photo.uri, [{ resize: { width: 400 } }],
-        { compress: 0.35, format: ImageManipulator.SaveFormat.JPEG, base64: true },
-      );
-      if (!manip.base64) return;
-      const text = await ocrFromBase64(manip.base64);
-      if (text && text !== liveText) {
-        setLiveText(text);
-        setLiveStatus('translating');
-        const tr = await doTranslate(text, localTargetLang);
-        setLiveTranslation(tr);
+
+      // On-device ML Kit recognition
+      const mlResult = await TextRecognition.recognize(photo.uri, TextRecognitionScript.LATIN);
+      if (!mlResult.blocks.length) {
+        setOverlayBlocks([]);
+        return;
       }
+
+      // Scale factors: image coords → screen coords
+      const imgW = photo.width || SCREEN_W;
+      const imgH = photo.height || SCREEN_H;
+      const scaleX = SCREEN_W / imgW;
+      const scaleY = SCREEN_H / imgH;
+
+      // Build blocks with positions
+      const newBlocks: OverlayBlock[] = await Promise.all(
+        mlResult.blocks
+          .filter(b => b.text.trim().length > 1 && b.frame)
+          .slice(0, 8) // max 8 blocks at once
+          .map(async (b) => {
+            const tr = await doTranslate(b.text.trim(), localTargetLang);
+            return {
+              id: `${b.frame!.left}-${b.frame!.top}`,
+              original: b.text.trim(),
+              translation: tr || b.text.trim(),
+              x: (b.frame!.left ?? 0) * scaleX,
+              y: (b.frame!.top ?? 0) * scaleY,
+              w: (b.frame!.width ?? 80) * scaleX,
+              h: Math.max((b.frame!.height ?? 24) * scaleY, 22),
+            };
+          })
+      );
+
+      setOverlayBlocks(newBlocks);
     } catch {
-      // silent
+      // silent error
     } finally {
       setLiveStatus('idle');
       liveBusyRef.current = false;
     }
-  }, [liveText, localTargetLang, doTranslate]);
+  }, [localTargetLang, doTranslate]);
 
   useEffect(() => {
     if (!liveScan) {
       if (liveTimerRef.current) clearInterval(liveTimerRef.current);
+      setOverlayBlocks([]);
       return;
     }
     liveBusyRef.current = false;
-    runLiveCapture();
-    liveTimerRef.current = setInterval(runLiveCapture, 4000);
+    runLiveScan();
+    liveTimerRef.current = setInterval(runLiveScan, 2000);
     return () => { if (liveTimerRef.current) clearInterval(liveTimerRef.current); };
   }, [liveScan]);
 
-  // Re-translate live text when language changes
+  // Re-scan on language change
   useEffect(() => {
-    if (liveScan && liveText) {
-      doTranslate(liveText, localTargetLang).then(tr => setLiveTranslation(tr)).catch(() => {});
+    if (liveScan) {
+      translationCache.current.clear();
+      runLiveScan();
     }
   }, [localTargetLang]);
 
@@ -148,30 +192,22 @@ export default function CameraScreen() {
       const { granted } = await requestCameraPermission();
       if (!granted) { Alert.alert('İzin Gerekli', 'Kamera izni gerekiyor.'); return; }
     }
-    setLocalTargetLang('en'); // Canlı tarama default: İngilizce
-    setLiveText(''); setLiveTranslation('');
+    translationCache.current.clear();
+    setLocalTargetLang('en');
+    setOverlayBlocks([]);
     setLiveScan(true);
   };
 
   const stopLiveScan = () => {
     setLiveScan(false);
-    setLiveText(''); setLiveTranslation('');
+    setOverlayBlocks([]);
     setLiveStatus('idle');
   };
 
-  const liveTranslateNow = async () => {
-    if (!liveText) return;
-    setLiveStatus('translating');
-    try {
-      const tr = await doTranslate(liveText, localTargetLang);
-      setLiveTranslation(tr);
-    } catch {} finally { setLiveStatus('idle'); }
-  };
-
-  // ── Photo/gallery ───────────────────────────────────────────────────────────
+  // ── Photo/gallery ──────────────────────────────────────────────────────────
   const processPhoto = async (uri: string) => {
     setState('ocr');
-    setResultText(''); setResultTranslation(''); setResultImageUri(uri);
+    setResultText(''); setResultTranslation('');
     try {
       const manip = await ImageManipulator.manipulateAsync(
         uri, [{ resize: { width: 600 } }],
@@ -198,7 +234,6 @@ export default function CameraScreen() {
     try {
       const tr = await doTranslate(resultText, localTargetLang);
       setResultTranslation(tr);
-      // Update history item
       if (currentItem) {
         removeItem(currentItem.id);
         const item = addItem({ imageUri: currentItem.imageUri, originalText: resultText, translatedText: tr, targetLang: localTargetLang });
@@ -243,10 +278,8 @@ export default function CameraScreen() {
   const activeItem = state === 'viewing' ? viewingItem : currentItem;
   const showResult = (state === 'done' || state === 'viewing') && !!activeItem;
   const isProcessing = state === 'ocr' || state === 'translating';
-
   const langData = LANGUAGES.find(l => l.code === localTargetLang);
 
-  // ── Language Selector Modal ─────────────────────────────────────────────────
   const langPicker = showLangPicker ? (
     <LanguageSelector
       mode="target"
@@ -256,11 +289,28 @@ export default function CameraScreen() {
     />
   ) : null;
 
-  // ── Live Scan Screen ────────────────────────────────────────────────────────
+  // ── Live AR Screen ─────────────────────────────────────────────────────────
   if (liveScan) {
     return (
       <View style={styles.liveContainer}>
         <CameraView ref={cameraRef} style={StyleSheet.absoluteFillObject} facing="back" />
+
+        {/* AR Overlay: translated text blocks at original positions */}
+        {overlayBlocks.map((block) => (
+          <View
+            key={block.id}
+            style={[styles.arBlock, {
+              left: block.x,
+              top: block.y,
+              minWidth: block.w,
+              minHeight: block.h,
+            }]}
+          >
+            <Text style={[styles.arText, { fontSize: Math.max(11, block.h * 0.55) }]} numberOfLines={3}>
+              {block.translation}
+            </Text>
+          </View>
+        ))}
 
         {/* Top bar */}
         <SafeAreaView edges={['top']} style={styles.liveTop}>
@@ -268,57 +318,27 @@ export default function CameraScreen() {
             <CloseIcon size={18} color="#fff" />
           </TouchableOpacity>
 
-          <View style={styles.liveScanBadge}>
-            {liveStatus !== 'idle'
+          <View style={styles.liveBadge}>
+            {liveStatus === 'scanning'
               ? <ActivityIndicator size="small" color={Colors.accent.cyan} />
-              : <View style={styles.liveDot} />}
-            <Text style={styles.liveBadgeText}>Canlı Tarama</Text>
+              : <View style={styles.liveDot} />
+            }
+            <Text style={styles.liveBadgeText}>Canlı Çeviri</Text>
           </View>
 
-          {/* Language selector */}
           <TouchableOpacity style={styles.liveLangBtn} onPress={() => setShowLangPicker(true)}>
             <Text style={styles.liveLangFlag}>{langData?.flag ?? '🌐'}</Text>
             <Text style={styles.liveLangName}>{langData?.nativeName ?? localTargetLang}</Text>
-            <ChevronDownIcon size={12} color="rgba(255,255,255,0.7)" />
+            <ChevronDownIcon size={11} color="rgba(255,255,255,0.7)" />
           </TouchableOpacity>
         </SafeAreaView>
 
-        {/* Scan frame */}
-        <View style={styles.liveScanFrame} pointerEvents="none">
-          <View style={[styles.scanCorner, styles.scanCornerTL]} />
-          <View style={[styles.scanCorner, styles.scanCornerTR]} />
-          <View style={[styles.scanCorner, styles.scanCornerBL]} />
-          <View style={[styles.scanCorner, styles.scanCornerBR]} />
-          {liveStatus === 'idle' && !liveText && (
-            <Text style={styles.liveHint}>Metni çerçeve içinde tut</Text>
-          )}
-        </View>
-
-        {/* Result overlay */}
-        {liveText ? (
-          <View style={styles.liveOverlay}>
-            <LinearGradient colors={['transparent', 'rgba(5,5,16,0.97)']} style={StyleSheet.absoluteFillObject} />
-            <Text style={styles.liveOriginal} numberOfLines={2}>{liveText}</Text>
-            {liveTranslation ? (
-              <>
-                <View style={styles.liveDivider} />
-                <Text style={styles.liveTranslated} numberOfLines={3}>{liveTranslation}</Text>
-              </>
-            ) : null}
-            <TouchableOpacity
-              style={styles.liveTranslateBtn}
-              onPress={liveTranslateNow}
-              disabled={liveStatus === 'translating'}
-            >
-              <LinearGradient colors={['#6C63FF', '#A78BFA']} style={styles.liveTranslateBtnGrad}>
-                {liveStatus === 'translating'
-                  ? <ActivityIndicator size="small" color="#fff" />
-                  : <><LanguageIcon size={15} color="#fff" /><Text style={styles.liveTranslateBtnText}>Çevir</Text></>
-                }
-              </LinearGradient>
-            </TouchableOpacity>
+        {/* Empty state */}
+        {overlayBlocks.length === 0 && liveStatus === 'idle' && (
+          <View style={styles.liveHintBox}>
+            <Text style={styles.liveHint}>Kamerayı metne doğrult</Text>
           </View>
-        ) : null}
+        )}
 
         {langPicker}
       </View>
@@ -366,7 +386,6 @@ export default function CameraScreen() {
             </View>
           ) : (
             <View style={styles.idleContent}>
-              {/* Language selector */}
               <TouchableOpacity style={styles.idleLangBtn} onPress={() => setShowLangPicker(true)}>
                 <Text style={styles.idleLangFlag}>{langData?.flag ?? '🌐'}</Text>
                 <Text style={styles.idleLangName}>{langData?.name ?? localTargetLang}</Text>
@@ -385,7 +404,7 @@ export default function CameraScreen() {
                 <TouchableOpacity style={styles.liveBtn} onPress={startLiveScan}>
                   <LinearGradient colors={['#EF4444', '#DC2626']} style={styles.primaryBtnGrad}>
                     <View style={styles.liveDotSmall} />
-                    <Text style={styles.primaryBtnText}>Canlı Tarama</Text>
+                    <Text style={styles.primaryBtnText}>Canlı Çeviri (AR)</Text>
                   </LinearGradient>
                 </TouchableOpacity>
                 <TouchableOpacity style={styles.primaryBtn} onPress={handleOpenCamera}>
@@ -404,12 +423,10 @@ export default function CameraScreen() {
         </View>
       )}
 
-      {/* Result View */}
+      {/* Result */}
       {showResult && (
         <ScrollView style={styles.resultScroll} contentContainerStyle={styles.resultContent} showsVerticalScrollIndicator={false}>
           <Image source={{ uri: activeItem!.imageUri }} style={styles.resultImage} resizeMode="cover" />
-
-          {/* Language selector in result */}
           <View style={styles.resultLangRow}>
             <Text style={styles.resultLangLabel}>Hedef Dil:</Text>
             <TouchableOpacity style={styles.resultLangBtn} onPress={() => setShowLangPicker(true)}>
@@ -427,7 +444,6 @@ export default function CameraScreen() {
                 : <Text style={styles.retranslateBtnText}>Çevir</Text>}
             </TouchableOpacity>
           </View>
-
           <View style={styles.textCard}>
             <Text style={styles.textCardLabel}>Tespit Edilen Metin</Text>
             <Text style={styles.textCardBody}>{activeItem!.originalText}</Text>
@@ -439,7 +455,6 @@ export default function CameraScreen() {
         </ScrollView>
       )}
 
-      {/* Result Controls */}
       {showResult && (
         <View style={styles.resultControls}>
           <LinearGradient colors={['transparent', 'rgba(5,5,16,0.97)']} style={StyleSheet.absoluteFillObject} />
@@ -473,49 +488,57 @@ const BORDER = 3;
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#050510' },
 
-  // Live scan
+  // Live AR
   liveContainer: { flex: 1, backgroundColor: '#000' },
+  arBlock: {
+    position: 'absolute',
+    backgroundColor: 'rgba(10,10,20,0.82)',
+    borderRadius: 4,
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+    maxWidth: SCREEN_W * 0.9,
+  },
+  arText: {
+    color: '#fff',
+    fontWeight: '600',
+    lineHeight: 16,
+    flexShrink: 1,
+  },
   liveTop: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
     paddingHorizontal: 14, paddingVertical: 8, gap: 8,
   },
   liveIconBtn: {
     width: 38, height: 38, borderRadius: 19,
-    backgroundColor: 'rgba(0,0,0,0.55)', justifyContent: 'center', alignItems: 'center',
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.18)',
+    backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center',
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)',
   },
-  liveScanBadge: {
+  liveBadge: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
-    backgroundColor: 'rgba(0,0,0,0.55)', borderRadius: 20,
+    backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 20,
     paddingHorizontal: 12, paddingVertical: 6,
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.18)',
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)',
   },
   liveDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#EF4444' },
   liveDotSmall: { width: 7, height: 7, borderRadius: 4, backgroundColor: '#fff' },
   liveBadgeText: { color: '#fff', fontSize: 12, fontWeight: '600' },
   liveLangBtn: {
     flexDirection: 'row', alignItems: 'center', gap: 5,
-    backgroundColor: 'rgba(0,0,0,0.55)', borderRadius: 20,
+    backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 20,
     paddingHorizontal: 10, paddingVertical: 6,
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.18)',
+    borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)',
   },
   liveLangFlag: { fontSize: 16 },
-  liveLangName: { color: '#fff', fontSize: 12, fontWeight: '600', maxWidth: 60 },
-  liveScanFrame: {
-    position: 'absolute', top: '28%', left: 28, right: 28, bottom: '35%',
-    justifyContent: 'center', alignItems: 'center',
+  liveLangName: { color: '#fff', fontSize: 12, fontWeight: '600', maxWidth: 70 },
+  liveHintBox: {
+    position: 'absolute', bottom: 80, left: 0, right: 0,
+    alignItems: 'center',
   },
-  liveHint: { color: 'rgba(255,255,255,0.5)', fontSize: 13, textAlign: 'center' },
-  liveOverlay: {
-    position: 'absolute', bottom: 0, left: 0, right: 0,
-    padding: 18, paddingBottom: 32, gap: 8, overflow: 'hidden',
+  liveHint: {
+    color: 'rgba(255,255,255,0.6)', fontSize: 14,
+    backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 12,
+    paddingHorizontal: 16, paddingVertical: 8,
   },
-  liveOriginal: { color: 'rgba(255,255,255,0.7)', fontSize: 13, lineHeight: 18 },
-  liveDivider: { height: 1, backgroundColor: 'rgba(255,255,255,0.15)' },
-  liveTranslated: { color: '#fff', fontSize: 18, fontWeight: '700', lineHeight: 25 },
-  liveTranslateBtn: { borderRadius: BorderRadius.full, overflow: 'hidden', marginTop: 4, alignSelf: 'flex-start' },
-  liveTranslateBtnGrad: { flexDirection: 'row', alignItems: 'center', gap: 7, paddingHorizontal: 18, paddingVertical: 10 },
-  liveTranslateBtnText: { color: '#fff', fontWeight: '700', fontSize: 14 },
 
   // Scan corners
   scanCorner: { position: 'absolute', width: CORNER, height: CORNER },
@@ -559,37 +582,21 @@ const styles = StyleSheet.create({
   resultScroll: { flex: 1 },
   resultContent: { paddingBottom: 100 },
   resultImage: { width: '100%', height: 200, borderBottomLeftRadius: 16, borderBottomRightRadius: 16 },
-  resultLangRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 8,
-    paddingHorizontal: Spacing.base, paddingTop: Spacing.md, paddingBottom: 4,
-  },
+  resultLangRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: Spacing.base, paddingTop: Spacing.md, paddingBottom: 4 },
   resultLangLabel: { fontSize: 13, color: Colors.text.muted },
-  resultLangBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 5,
-    backgroundColor: Colors.bg.card, borderRadius: BorderRadius.full,
-    paddingHorizontal: 12, paddingVertical: 6,
-    borderWidth: 1, borderColor: Colors.accent.primary + '50',
-  },
+  resultLangBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: Colors.bg.card, borderRadius: BorderRadius.full, paddingHorizontal: 12, paddingVertical: 6, borderWidth: 1, borderColor: Colors.accent.primary + '50' },
   resultLangFlag: { fontSize: 16 },
   resultLangName: { fontSize: 13, fontWeight: '600', color: Colors.accent.primary },
-  retranslateBtn: {
-    backgroundColor: Colors.accent.primary, borderRadius: BorderRadius.full,
-    paddingHorizontal: 14, paddingVertical: 7, marginLeft: 'auto',
-  },
+  retranslateBtn: { backgroundColor: Colors.accent.primary, borderRadius: BorderRadius.full, paddingHorizontal: 14, paddingVertical: 7, marginLeft: 'auto' },
   retranslateBtnText: { color: '#fff', fontWeight: '700', fontSize: 13 },
   textCard: { margin: Spacing.base, marginTop: Spacing.md, padding: Spacing.base, backgroundColor: Colors.bg.card, borderRadius: BorderRadius.xl, borderWidth: 1, borderColor: Colors.bg.cardBorder, gap: 6 },
   textCardAccent: { borderColor: Colors.accent.primary + '40' },
-  textCardRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   textCardLabel: { fontSize: 11, color: Colors.text.muted, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5 },
   textCardBody: { fontSize: 15, color: Colors.text.primary, lineHeight: 22 },
-  langBadge: { fontSize: 13, color: Colors.accent.secondary, fontWeight: '600' },
 
   // Result controls
   resultControls: { position: 'absolute', bottom: 0, left: 0, right: 0, paddingBottom: 24, paddingTop: 16, paddingHorizontal: Spacing.base, overflow: 'hidden' },
   resultControlsRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
   smallBtn: { alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 10, paddingHorizontal: 12, backgroundColor: Colors.bg.card, borderRadius: BorderRadius.lg, borderWidth: 1, borderColor: Colors.bg.cardBorder },
   smallBtnLabel: { fontSize: 10, color: Colors.text.secondary, fontWeight: '600' },
-  translateBtn: { flex: 1, borderRadius: BorderRadius.full, overflow: 'hidden' },
-  translateBtnGrad: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 14 },
-  translateBtnText: { color: '#fff', fontWeight: '700', fontSize: 14 },
 });
