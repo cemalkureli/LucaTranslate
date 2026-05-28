@@ -1,14 +1,13 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, FlatList,
-  ActivityIndicator, Image, Alert, ScrollView, Dimensions,
+  ActivityIndicator, Image, Alert, ScrollView,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import { useRouter } from 'expo-router';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import TextRecognition, { TextRecognitionScript } from '@react-native-ml-kit/text-recognition';
 import { Colors, Spacing, BorderRadius, LANGUAGES } from '../../constants/theme';
@@ -17,19 +16,16 @@ import { useOcrHistoryStore, OcrHistoryItem } from '../../store/ocrHistoryStore'
 import { translate } from '../../services/translate';
 import LanguageSelector from '../../components/LanguageSelector';
 import {
-  CameraIcon, LanguageIcon, ScanIcon,
-  BackIcon, TrashIcon, DownloadIcon, CloseIcon, ChevronDownIcon,
+  CameraIcon, ScanIcon, BackIcon, TrashIcon,
+  DownloadIcon, CloseIcon, ChevronDownIcon, LanguageIcon,
 } from '../../components/Icons';
 
 let MediaLibrary: any = null;
 try { MediaLibrary = require('expo-media-library'); } catch {}
 
 const OCR_KEY_STORAGE = 'lingua_ocr_api_key';
-const { width: SCREEN_W, height: SCREEN_H } = Dimensions.get('window');
-
 type State = 'idle' | 'ocr' | 'translating' | 'done' | 'viewing';
 
-// ── OCR.space (for photo/gallery mode) ──────────────────────────────────────
 async function getOcrApiKey(): Promise<string> {
   try {
     const key = await AsyncStorage.getItem(OCR_KEY_STORAGE);
@@ -59,19 +55,7 @@ async function ocrFromBase64(base64: string): Promise<string> {
   return text;
 }
 
-// ── Overlay block type ───────────────────────────────────────────────────────
-interface OverlayBlock {
-  id: string;
-  original: string;
-  translation: string;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
-
 export default function CameraScreen() {
-  const router = useRouter();
   const [state, setState] = useState<State>('idle');
   const [currentItem, setCurrentItem] = useState<OcrHistoryItem | null>(null);
   const [viewingItem, setViewingItem] = useState<OcrHistoryItem | null>(null);
@@ -87,103 +71,75 @@ export default function CameraScreen() {
   const [resultTranslation, setResultTranslation] = useState('');
   const [isTranslatingResult, setIsTranslatingResult] = useState(false);
 
-  // Live AR scan
+  // Live scan
   const [liveScan, setLiveScan] = useState(false);
-  const [overlayBlocks, setOverlayBlocks] = useState<OverlayBlock[]>([]);
-  const [liveStatus, setLiveStatus] = useState<'idle' | 'scanning'>('idle');
+  const [liveDetected, setLiveDetected] = useState('');      // raw detected text
+  const [liveTranslation, setLiveTranslation] = useState(''); // translated
+  const [liveStatus, setLiveStatus] = useState<'idle' | 'scanning' | 'translating'>('idle');
   const cameraRef = useRef<CameraView>(null);
   const liveTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const liveBusyRef = useRef(false);
   const translationCache = useRef<Map<string, string>>(new Map());
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
 
-  // ── Translate helper ───────────────────────────────────────────────────────
-  const doTranslate = useCallback(async (text: string, targetLang: string): Promise<string> => {
-    const cached = translationCache.current.get(`${text}||${targetLang}`);
+  const doTranslate = useCallback(async (text: string, lang: string): Promise<string> => {
+    const key = `${text}||${lang}`;
+    const cached = translationCache.current.get(key);
     if (cached) return cached;
     const result = await translate(
-      { q: text, source: 'auto', target: targetLang },
+      { q: text, source: 'auto', target: lang },
       { preferredInstance: settings.preferredInstance, apiKey: settings.apiKey },
     );
     const tr = result.translatedText || '';
-    if (tr) translationCache.current.set(`${text}||${targetLang}`, tr);
+    if (tr) translationCache.current.set(key, tr);
     return tr;
   }, [settings]);
 
-  // ── Live AR scan ───────────────────────────────────────────────────────────
+  // ── Live scan: ML Kit on-device OCR + translate ──────────────────────────
   const runLiveScan = useCallback(async () => {
     if (!cameraRef.current || liveBusyRef.current) return;
     liveBusyRef.current = true;
     setLiveStatus('scanning');
-
     try {
-      // Capture frame silently
       const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.25,
-        base64: false,
-        shutterSound: false,
-        skipProcessing: true,
+        quality: 0.3, base64: false, shutterSound: false, skipProcessing: true,
       } as any);
       if (!photo?.uri) return;
 
-      // On-device ML Kit recognition
+      // On-device recognition — no internet needed
       const mlResult = await TextRecognition.recognize(photo.uri, TextRecognitionScript.LATIN);
-      if (!mlResult.blocks.length) {
-        setOverlayBlocks([]);
-        return;
-      }
+      const text = mlResult.text?.trim();
+      if (!text || text === liveDetected) return;
 
-      // Scale factors: image coords → screen coords
-      const imgW = photo.width || SCREEN_W;
-      const imgH = photo.height || SCREEN_H;
-      const scaleX = SCREEN_W / imgW;
-      const scaleY = SCREEN_H / imgH;
-
-      // Build blocks with positions
-      const newBlocks: OverlayBlock[] = await Promise.all(
-        mlResult.blocks
-          .filter(b => b.text.trim().length > 1 && b.frame)
-          .slice(0, 8) // max 8 blocks at once
-          .map(async (b) => {
-            const tr = await doTranslate(b.text.trim(), localTargetLang);
-            return {
-              id: `${b.frame!.left}-${b.frame!.top}`,
-              original: b.text.trim(),
-              translation: tr || b.text.trim(),
-              x: (b.frame!.left ?? 0) * scaleX,
-              y: (b.frame!.top ?? 0) * scaleY,
-              w: (b.frame!.width ?? 80) * scaleX,
-              h: Math.max((b.frame!.height ?? 24) * scaleY, 22),
-            };
-          })
-      );
-
-      setOverlayBlocks(newBlocks);
+      setLiveDetected(text);
+      setLiveStatus('translating');
+      const tr = await doTranslate(text, localTargetLang);
+      setLiveTranslation(tr);
     } catch {
-      // silent error
+      // silent
     } finally {
       setLiveStatus('idle');
       liveBusyRef.current = false;
     }
-  }, [localTargetLang, doTranslate]);
+  }, [liveDetected, localTargetLang, doTranslate]);
 
   useEffect(() => {
     if (!liveScan) {
       if (liveTimerRef.current) clearInterval(liveTimerRef.current);
-      setOverlayBlocks([]);
+      setLiveDetected('');
+      setLiveTranslation('');
       return;
     }
     liveBusyRef.current = false;
     runLiveScan();
-    liveTimerRef.current = setInterval(runLiveScan, 2000);
+    liveTimerRef.current = setInterval(runLiveScan, 2500);
     return () => { if (liveTimerRef.current) clearInterval(liveTimerRef.current); };
   }, [liveScan]);
 
-  // Re-scan on language change
+  // Re-translate when language changes
   useEffect(() => {
-    if (liveScan) {
-      translationCache.current.clear();
-      runLiveScan();
+    if (liveScan && liveDetected) {
+      doTranslate(liveDetected, localTargetLang).then(setLiveTranslation).catch(() => {});
     }
   }, [localTargetLang]);
 
@@ -194,17 +150,12 @@ export default function CameraScreen() {
     }
     translationCache.current.clear();
     setLocalTargetLang('en');
-    setOverlayBlocks([]);
+    setLiveDetected('');
+    setLiveTranslation('');
     setLiveScan(true);
   };
 
-  const stopLiveScan = () => {
-    setLiveScan(false);
-    setOverlayBlocks([]);
-    setLiveStatus('idle');
-  };
-
-  // ── Photo/gallery ──────────────────────────────────────────────────────────
+  // ── Photo/gallery ─────────────────────────────────────────────────────────
   const processPhoto = async (uri: string) => {
     setState('ocr');
     setResultText(''); setResultTranslation('');
@@ -273,7 +224,11 @@ export default function CameraScreen() {
   };
 
   const handleDeleteItem = (id: string) => { removeItem(id); setViewingItem(null); setState('idle'); };
-  const handleRetakeOrBack = () => { setCurrentItem(null); setViewingItem(null); setResultText(''); setResultTranslation(''); setState('idle'); };
+  const handleRetakeOrBack = () => {
+    setCurrentItem(null); setViewingItem(null);
+    setResultText(''); setResultTranslation('');
+    setState('idle');
+  };
 
   const activeItem = state === 'viewing' ? viewingItem : currentItem;
   const showResult = (state === 'done' || state === 'viewing') && !!activeItem;
@@ -289,41 +244,26 @@ export default function CameraScreen() {
     />
   ) : null;
 
-  // ── Live AR Screen ─────────────────────────────────────────────────────────
+  // ── Live Scan Screen ──────────────────────────────────────────────────────
   if (liveScan) {
     return (
       <View style={styles.liveContainer}>
+        {/* Live camera */}
         <CameraView ref={cameraRef} style={StyleSheet.absoluteFillObject} facing="back" />
-
-        {/* AR Overlay: translated text blocks at original positions */}
-        {overlayBlocks.map((block) => (
-          <View
-            key={block.id}
-            style={[styles.arBlock, {
-              left: block.x,
-              top: block.y,
-              minWidth: block.w,
-              minHeight: block.h,
-            }]}
-          >
-            <Text style={[styles.arText, { fontSize: Math.max(11, block.h * 0.55) }]} numberOfLines={3}>
-              {block.translation}
-            </Text>
-          </View>
-        ))}
 
         {/* Top bar */}
         <SafeAreaView edges={['top']} style={styles.liveTop}>
-          <TouchableOpacity style={styles.liveIconBtn} onPress={stopLiveScan}>
+          <TouchableOpacity style={styles.liveIconBtn} onPress={() => setLiveScan(false)}>
             <CloseIcon size={18} color="#fff" />
           </TouchableOpacity>
 
           <View style={styles.liveBadge}>
-            {liveStatus === 'scanning'
+            {liveStatus !== 'idle'
               ? <ActivityIndicator size="small" color={Colors.accent.cyan} />
-              : <View style={styles.liveDot} />
-            }
-            <Text style={styles.liveBadgeText}>Canlı Çeviri</Text>
+              : <View style={styles.liveDot} />}
+            <Text style={styles.liveBadgeText}>
+              {liveStatus === 'scanning' ? 'Taranıyor...' : liveStatus === 'translating' ? 'Çevriliyor...' : 'Canlı Çeviri'}
+            </Text>
           </View>
 
           <TouchableOpacity style={styles.liveLangBtn} onPress={() => setShowLangPicker(true)}>
@@ -333,12 +273,26 @@ export default function CameraScreen() {
           </TouchableOpacity>
         </SafeAreaView>
 
-        {/* Empty state */}
-        {overlayBlocks.length === 0 && liveStatus === 'idle' && (
-          <View style={styles.liveHintBox}>
-            <Text style={styles.liveHint}>Kamerayı metne doğrult</Text>
-          </View>
-        )}
+        {/* Bottom translation panel */}
+        <View style={styles.liveBottom}>
+          <LinearGradient colors={['transparent', 'rgba(5,5,16,0.95)']} style={StyleSheet.absoluteFillObject} />
+          {liveTranslation ? (
+            <View style={styles.liveResultBox}>
+              {liveDetected ? (
+                <Text style={styles.liveOriginalText} numberOfLines={2}>{liveDetected}</Text>
+              ) : null}
+              <View style={styles.liveDivider} />
+              <View style={styles.liveTranslationRow}>
+                <Text style={styles.liveLangFlagSmall}>{langData?.flag ?? '🌐'}</Text>
+                <Text style={styles.liveTranslatedText} numberOfLines={4}>{liveTranslation}</Text>
+              </View>
+            </View>
+          ) : (
+            <Text style={styles.liveHint}>
+              {liveStatus !== 'idle' ? '' : 'Kamerayı metne doğrult'}
+            </Text>
+          )}
+        </View>
 
         {langPicker}
       </View>
@@ -404,7 +358,7 @@ export default function CameraScreen() {
                 <TouchableOpacity style={styles.liveBtn} onPress={startLiveScan}>
                   <LinearGradient colors={['#EF4444', '#DC2626']} style={styles.primaryBtnGrad}>
                     <View style={styles.liveDotSmall} />
-                    <Text style={styles.primaryBtnText}>Canlı Çeviri (AR)</Text>
+                    <Text style={styles.primaryBtnText}>Canlı Çeviri</Text>
                   </LinearGradient>
                 </TouchableOpacity>
                 <TouchableOpacity style={styles.primaryBtn} onPress={handleOpenCamera}>
@@ -488,22 +442,8 @@ const BORDER = 3;
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#050510' },
 
-  // Live AR
+  // Live scan
   liveContainer: { flex: 1, backgroundColor: '#000' },
-  arBlock: {
-    position: 'absolute',
-    backgroundColor: 'rgba(10,10,20,0.82)',
-    borderRadius: 4,
-    paddingHorizontal: 4,
-    paddingVertical: 2,
-    maxWidth: SCREEN_W * 0.9,
-  },
-  arText: {
-    color: '#fff',
-    fontWeight: '600',
-    lineHeight: 16,
-    flexShrink: 1,
-  },
   liveTop: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
     paddingHorizontal: 14, paddingVertical: 8, gap: 8,
@@ -530,14 +470,19 @@ const styles = StyleSheet.create({
   },
   liveLangFlag: { fontSize: 16 },
   liveLangName: { color: '#fff', fontSize: 12, fontWeight: '600', maxWidth: 70 },
-  liveHintBox: {
-    position: 'absolute', bottom: 80, left: 0, right: 0,
-    alignItems: 'center',
+  liveBottom: {
+    position: 'absolute', bottom: 0, left: 0, right: 0,
+    minHeight: 120, justifyContent: 'flex-end', overflow: 'hidden',
   },
+  liveResultBox: { padding: 18, paddingBottom: 36, gap: 8 },
+  liveOriginalText: { color: 'rgba(255,255,255,0.55)', fontSize: 13, lineHeight: 18 },
+  liveDivider: { height: 1, backgroundColor: 'rgba(255,255,255,0.15)' },
+  liveTranslationRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
+  liveLangFlagSmall: { fontSize: 18, marginTop: 1 },
+  liveTranslatedText: { flex: 1, color: '#fff', fontSize: 20, fontWeight: '700', lineHeight: 27 },
   liveHint: {
-    color: 'rgba(255,255,255,0.6)', fontSize: 14,
-    backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 12,
-    paddingHorizontal: 16, paddingVertical: 8,
+    textAlign: 'center', color: 'rgba(255,255,255,0.5)', fontSize: 14,
+    paddingBottom: 40, paddingTop: 16,
   },
 
   // Scan corners
