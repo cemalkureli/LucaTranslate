@@ -46,10 +46,18 @@ D:/tmp/
 .env
 .env.*
 !.env.example
+secrets/
 *.pem
 *.jks
 *.keystore
 !android/app/debug.keystore
+*.p8
+*.p12
+*.mobileprovision
+
+# ── Google / Firebase ────────────────────────────────────────
+google-services.json
+GoogleService-Info.plist
 
 # ── Python ──────────────────────────────────────────────────
 __pycache__/

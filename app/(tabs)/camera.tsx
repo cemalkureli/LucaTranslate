@@ -118,8 +118,19 @@ export default function CameraScreen() {
         quality: 20,
       });
       const path = snapshot.path.startsWith('file://') ? snapshot.path : `file://${snapshot.path}`;
-      const mlResult = await TextRecognition.recognize(path, TextRecognitionScript.LATIN);
-      const text = mlResult.text?.trim();
+
+      // Run all ML Kit scripts in parallel — pick the one with most detected text
+      const results = await Promise.allSettled([
+        TextRecognition.recognize(path, TextRecognitionScript.LATIN),
+        TextRecognition.recognize(path, TextRecognitionScript.CHINESE),
+        TextRecognition.recognize(path, TextRecognitionScript.JAPANESE),
+        TextRecognition.recognize(path, TextRecognitionScript.KOREAN),
+        TextRecognition.recognize(path, TextRecognitionScript.DEVANAGARI),
+      ]);
+      const text = results
+        .filter((r): r is PromiseFulfilledResult<any> => r.status === 'fulfilled')
+        .map(r => r.value.text?.trim() ?? '')
+        .reduce((best, cur) => (cur.length > best.length ? cur : best), '');
 
       // Use ref for deduplication — no stale closure
       if (!text || text === liveDetectedRef.current) return;

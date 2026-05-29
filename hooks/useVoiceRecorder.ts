@@ -98,6 +98,7 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
   const recordingRef = useRef<Audio.Recording | null>(null);
   const recognizerActiveRef = useRef(false);
   const pendingRestartRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryCountRef = useRef(0);
 
   const lastSpeechRef = useRef(0);
   const silenceIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -170,6 +171,7 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
         try { Voice.cancel().catch(() => {}); } catch {}
         return;
       }
+      retryCountRef.current = 0; // Recognizer started successfully — reset retry counter
       recognizerActiveRef.current = true;
       setState('recording');
     };
@@ -218,28 +220,38 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
       recognizerActiveRef.current = false;
       const code = String(e.error?.code ?? '');
       const msg = String(e.error?.message ?? '');
+      // Stale error (no active session) — ignore
+      if (!activeRef.current && !stoppingRef.current) return;
+
       const isSilence =
         code === '7' ||
         msg.startsWith('7/') ||
         msg.toLowerCase().includes('no match') ||
         msg.toLowerCase().includes('no speech');
-      // ERROR_RECOGNIZER_BUSY: previous session still alive, cancel and retry with longer gap
       const isBusy = code === '8';
+      // Pre-start errors (recognizer never got going): code 5 (client/cancel) or busy
+      // These are transient — retry up to 3 times before giving up
+      const isPreStart = !recognizerActiveRef.current && !stoppingRef.current && activeRef.current;
 
-      if (isSilence || isBusy) {
+      if (isSilence || isBusy || (code === '5' && isPreStart)) {
         if (activeRef.current && !stoppingRef.current) {
-          const delay = isBusy ? 350 : 100;
-          clearPendingRestart();
-          pendingRestartRef.current = setTimeout(async () => {
-            pendingRestartRef.current = null;
-            if (!activeRef.current || stoppingRef.current) return;
-            if (isBusy) try { await Voice.cancel().catch(() => {}); } catch {}
-            try { Voice.start(toLocale(currentLangRef.current), ANDROID_OPTS).catch(() => {}); } catch {}
-          }, delay);
+          if (retryCountRef.current >= 3) {
+            // Too many retries — fall through to real error
+          } else {
+            retryCountRef.current++;
+            const delay = isBusy ? 500 : code === '5' ? 200 : 100;
+            clearPendingRestart();
+            pendingRestartRef.current = setTimeout(() => {
+              pendingRestartRef.current = null;
+              if (!activeRef.current || stoppingRef.current) return;
+              try { Voice.start(toLocale(currentLangRef.current), ANDROID_OPTS).catch(() => {}); } catch {}
+            }, delay);
+            return;
+          }
         } else {
           fnRef.current.finalize();
+          return;
         }
-        return;
       }
 
       // Any error while intentionally stopping → treat as normal stop, don't lose text
@@ -251,6 +263,7 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
       // Real error
       clearSilenceCheck();
       clearPendingRestart();
+      retryCountRef.current = 0;
       activeRef.current = false;
       stoppingRef.current = false;
       accumulatedRef.current = '';
@@ -306,8 +319,10 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
 
     currentLangRef.current = lang;
     accumulatedRef.current = '';
+    lastPartialRef.current = '';
     stoppingRef.current = false;
     activeRef.current = true;
+    retryCountRef.current = 0;
     recognizerActiveRef.current = false;
     setPartialText('');
     setState('recording');
@@ -363,7 +378,7 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
     accumulatedRef.current = '';
     lastPartialRef.current = '';
     setPartialText('');
-    if (Voice) { try { await Voice.cancel(); } catch {} }
+    if (Voice) { try { Voice.cancel(); } catch {} }  // fire-and-forget: no await to avoid stale callback races
     if (recordingRef.current) {
       try { await recordingRef.current.stopAndUnloadAsync(); } catch {}
       recordingRef.current = null;

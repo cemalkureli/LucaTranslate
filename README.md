@@ -5,8 +5,9 @@ AI destekli mobil çeviri uygulaması. React Native + Expo ile geliştirilmiş, 
 ## Özellikler
 
 - **Metin Çevirisi** — 40+ dil, otomatik dil algılama, MyMemory fallback
-- **Sesli Giriş** — Google Web Speech API veya OpenAI Whisper
-- **Görsel OCR** — Telefonun kamerasından metin okuma ve çevirme
+- **Sesli Giriş** — Google Web Speech API veya OpenAI Whisper; otomatik başlatma, 3 saniyelik sessizlik algılama, hata toleranslı yeniden deneme
+- **Canlı Kamera Çevirisi** — Kamera görüntüsünden anlık metin tanıma ve çeviri; Latin, Çince, Japonca, Korece, Devanagari (Hindi) destekli çok-alfabe OCR
+- **Görsel OCR** — Galeriden veya kameradan fotoğraf ile metin okuma ve çevirme
 - **Çeviri Geçmişi** — Favorileme, silme, yeniden kullanma
 - **Özel Sunucu** — Kendi LibreTranslate sunucunuza bağlanın
 - **Dark UI** — Deep space teması, akıcı animasyonlar
@@ -22,6 +23,8 @@ AI destekli mobil çeviri uygulaması. React Native + Expo ile geliştirilmiş, 
 | expo-av | Ses kaydı (Whisper için) |
 | expo-image-picker | Kamera ve galeri erişimi |
 | @react-native-voice/voice | Native Google ses tanıma |
+| @react-native-ml-kit/text-recognition | Çok-alfabe on-device OCR |
+| react-native-vision-camera | Canlı kamera akışı |
 | expo-media-library | Galeriye kaydetme |
 | react-native-reanimated | Animasyonlar |
 
@@ -61,7 +64,13 @@ adb install -r android/app/build/outputs/apk/release/app-release.apk
 | Web Speech API | Google yerleşik servis, 50+ dil | İnternet |
 | OpenAI Whisper | En yüksek doğruluk, 100+ dil | OpenAI API anahtarı |
 
-Ayarlar: **Ayarlar → Ses Tanıma Ayarları**
+- Mikrofon butonu dili seçiliyken modalı açar ve kaydı otomatik başlatır
+- 3 saniye sessizlik algılandığında kayıt otomatik durur ve çeviri tetiklenir
+- Ayarlar: **Ayarlar → Ses Tanıma Ayarları**
+
+## Canlı Kamera Çevirisi
+
+Kamera ekranındaki **Canlı Çeviri** butonu ile kamerayı herhangi bir metne yöneltin. Uygulama 2.5 saniyede bir görüntüyü tarar; 5 farklı ML Kit modeli (Latin, Çince, Japonca, Korece, Devanagari) paralel çalışarak hangi alfabede olursa olsun metni tanır ve seçilen dile çevirir.
 
 ## Çeviri Sunucuları
 
@@ -82,14 +91,15 @@ Uygulamada: **Ayarlar → Sunucular → Özel Sunucu → Bağlan & Aktif Et**
 app/
   (tabs)/
     index.tsx         → Ana çeviri ekranı
-    camera.tsx        → Görsel OCR ekranı
+    camera.tsx        → Görsel OCR + Canlı Çeviri ekranı
     settings-tab.tsx  → Ayarlar özeti
   history.tsx         → Geçmiş modal
   settings.tsx        → Sunucu + genel ayarlar
   voice-settings.tsx  → Ses tanıma ayarları
 
 components/
-  VoiceModal.tsx      → Kayıt arayüzü
+  VoiceModal.tsx      → Kayıt arayüzü (dalga animasyonu, çeviri gösterimi)
+  VoiceMicButton.tsx  → Inline ve büyük mikrofon butonları
   LanguageSelector.tsx
   Icons.tsx
 
@@ -101,9 +111,9 @@ services/
   translate.ts        → LibreTranslate + MyMemory API
 
 hooks/
-  useVoiceRecorder.ts → Web Speech + OpenAI Whisper
+  useVoiceRecorder.ts → Web Speech + OpenAI Whisper; hata toleranslı retry sistemi
 ```
 
 ## Lisans
 
-MIT
+[MIT](LICENSE) © 2025 cemalkureli

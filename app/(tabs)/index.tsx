@@ -193,7 +193,13 @@ export default function TranslatorScreen() {
                     </TouchableOpacity>
                   </>
                 ) : null}
-                <InlineMicButton state={voice.state} onPress={() => setShowVoiceModal(true)} />
+                <InlineMicButton
+                  state={voice.state}
+                  onPress={() => {
+                    setShowVoiceModal(true);
+                    if (sourceLang !== 'auto') voice.startListening(sourceLang);
+                  }}
+                />
               </View>
             </View>
           </View>
