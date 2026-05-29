@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, FlatList,
-  ActivityIndicator, Image, Alert, ScrollView,
+  ActivityIndicator, Image, Alert, ScrollView, BackHandler,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -152,6 +152,16 @@ export default function CameraScreen() {
     liveTimerRef.current = setInterval(runLiveScan, 2500);
     return () => { if (liveTimerRef.current) clearInterval(liveTimerRef.current); };
   }, [liveScan, runLiveScan]);
+
+  // Hardware back button exits live scan
+  useEffect(() => {
+    if (!liveScan) return;
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      setLiveScan(false);
+      return true;
+    });
+    return () => sub.remove();
+  }, [liveScan]);
 
   // Re-translate when language changes — clear cache and detected text
   useEffect(() => {

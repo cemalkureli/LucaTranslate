@@ -112,12 +112,11 @@ export default function VoiceModal({
   }));
 
   const stateLabel = () => {
-    if (state === 'requesting') return 'Mikrofon izni isteniyor...';
-    if (state === 'recording') return 'Dinliyorum — bırakınca durdurur';
+    if (state === 'recording') return 'Dinliyorum... 5 sn sessizlikte otomatik durur';
     if (state === 'processing') return 'Ses analiz ediliyor...';
-    if (state === 'error') return 'Ses tanıma hatası.\nAyarlar → Ses Tanıma → Whisper seçin';
-    if (sourceLang === 'auto') return 'Konuşma dilinizi seçin veya konuşun';
-    return 'Hazır — konuşmaya başlayın';
+    if (state === 'error') return 'Ses tanıma hatası.';
+    if (sourceLang === 'auto') return 'Konuşma dilinizi seçin';
+    return 'Mikrofona dokunun';
   };
 
   return (
@@ -208,14 +207,12 @@ export default function VoiceModal({
                 )}
                 <Animated.View style={btnStyle}>
                   <Pressable
-                    onPressIn={() => {
-                      btnScale.value = withSpring(0.88, { damping: 10 });
+                    onPress={() => {
                       if (!isRecording && !isProcessing) onStartPress();
+                      else if (isRecording) onStopPress();
                     }}
-                    onPressOut={() => {
-                      btnScale.value = withSpring(1, { damping: 10 });
-                      if (isRecording) onStopPress();
-                    }}
+                    onPressIn={() => { btnScale.value = withSpring(0.88, { damping: 10 }); }}
+                    onPressOut={() => { btnScale.value = withSpring(1, { damping: 10 }); }}
                     style={styles.micBtn}
                   >
                     <LinearGradient
@@ -261,7 +258,7 @@ export default function VoiceModal({
 
           {state !== 'error' && (
             <Text style={styles.hint}>
-              {isRecording ? 'Butonu bıraktığınızda kaydı durdurur' : `${lang.nativeName} dilinde konuşun`}
+              {isRecording ? '5 sn sessizlik sonrası otomatik kapanır' : `${lang.nativeName} dilinde konuşun`}
             </Text>
           )}
 

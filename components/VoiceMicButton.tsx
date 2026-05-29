@@ -156,12 +156,10 @@ export default function VoiceMicButton({
 // ─── Compact inline mic button (for inside input card) ───────────────────────
 export function InlineMicButton({
   state,
-  onPressIn,
-  onPressOut,
+  onPress,
 }: {
   state: VoiceState;
-  onPressIn: () => void;
-  onPressOut: () => void;
+  onPress: () => void;
 }) {
   const pulse = useSharedValue(1);
   const isRecording = state === 'recording';
@@ -181,8 +179,7 @@ export function InlineMicButton({
   return (
     <Animated.View style={animStyle}>
       <Pressable
-        onPressIn={onPressIn}
-        onPressOut={onPressOut}
+        onPress={onPress}
         style={[
           styles.inlineBtn,
           isRecording && styles.inlineBtnRecording,

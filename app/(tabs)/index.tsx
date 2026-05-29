@@ -51,9 +51,9 @@ export default function TranslatorScreen() {
     onTranscript: (text) => {
       setSourceText(text);
       setShowVoiceModal(false);
+      performTranslation();
     },
     onError: (err) => console.warn('Voice error:', err),
-    language: 'tr',
   });
 
   const {
@@ -193,7 +193,12 @@ export default function TranslatorScreen() {
                     </TouchableOpacity>
                   </>
                 ) : null}
-                <InlineMicButton state={voice.state} onPressIn={() => setShowVoiceModal(true)} onPressOut={() => {}} />
+                <InlineMicButton state={voice.state} onPress={() => {
+                  setShowVoiceModal(true);
+                  if (sourceLang !== 'auto') {
+                    setTimeout(() => voice.startListening(sourceLang), 200);
+                  }
+                }} />
               </View>
             </View>
           </View>
@@ -304,7 +309,7 @@ export default function TranslatorScreen() {
         sourceLang={sourceLang}
         partialText={voice.partialText}
         onStartPress={() => voice.startListening(sourceLang === 'auto' ? '' : sourceLang)}
-        onStopPress={() => voice.stopListening(sourceLang === 'auto' ? '' : sourceLang)}
+        onStopPress={() => voice.stopListening()}
         onClose={() => { voice.cancelListening(); setShowVoiceModal(false); }}
         onSettingsPress={() => router.push('/voice-settings')}
         onLangSelect={(code) => {

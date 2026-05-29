@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import { Audio } from 'expo-av';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-export type VoiceState = 'idle' | 'requesting' | 'recording' | 'processing' | 'error';
+export type VoiceState = 'idle' | 'recording' | 'processing' | 'error';
 
 export interface VoiceSettings {
   engine: 'whisper-openai' | 'web-speech';
@@ -10,6 +10,7 @@ export interface VoiceSettings {
 }
 
 const VOICE_SETTINGS_KEY = 'lingua_voice_settings';
+const SILENCE_MS = 5000;
 
 const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
   engine: 'web-speech',
@@ -34,10 +35,8 @@ interface UseVoiceRecorderOptions {
   onTranscript: (text: string) => void;
   onPartial?: (text: string) => void;
   onError?: (error: string) => void;
-  language?: string;
 }
 
-// ─── Native Android Voice (uses Google's built-in SpeechRecognizer) ──────────
 let Voice: any = null;
 try {
   Voice = require('@react-native-voice/voice').default;
@@ -45,7 +44,6 @@ try {
   Voice = null;
 }
 
-// Maps ISO 639-1 codes → BCP-47 locales required by Android SpeechRecognizer
 const VOICE_LOCALE: Record<string, string> = {
   tr: 'tr-TR', en: 'en-US', de: 'de-DE', fr: 'fr-FR', es: 'es-ES',
   it: 'it-IT', pt: 'pt-PT', ru: 'ru-RU', ar: 'ar-SA', zh: 'zh-CN',
@@ -57,262 +55,262 @@ const VOICE_LOCALE: Record<string, string> = {
 };
 
 function toLocale(code: string): string {
-  if (!code) return ''; // auto-detect: SpeechRecognizer uses device default
+  if (!code) return '';
   if (code.includes('-')) return code;
   return VOICE_LOCALE[code] ?? code;
 }
 
-// ─── OpenAI Whisper backend ──────────────────────────────────────────────────
 async function transcribeWithOpenAI(uri: string, lang: string, apiKey: string): Promise<string> {
   const formData = new FormData();
   formData.append('file', { uri, type: 'audio/wav', name: 'voice.wav' } as any);
   formData.append('model', 'whisper-1');
   formData.append('response_format', 'text');
   if (lang && lang !== 'auto') formData.append('language', lang.split('-')[0]);
-
   const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}` },
     body: formData,
   });
-  if (!res.ok) throw new Error(`OpenAI error ${res.status}`);
+  if (!res.ok) throw new Error(`OpenAI ${res.status}`);
   return (await res.text()).trim();
 }
 
-// ─── Main hook ───────────────────────────────────────────────────────────────
 export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
+  // Always-fresh ref so Voice event handlers never have stale closures
+  const optsRef = useRef(opts);
+  useEffect(() => { optsRef.current = opts; });
+
   const [state, setState] = useState<VoiceState>('idle');
   const [partialText, setPartialText] = useState('');
-  const recordingRef = useRef<Audio.Recording | null>(null);
-  const voiceActiveRef = useRef(false);
-  const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const accumulatedTextRef = useRef('');  // biriktirilen tüm cümleler
-  const currentLangRef = useRef('');      // yeniden başlatma için dil
 
-  const clearSilenceTimer = () => {
-    if (silenceTimerRef.current) {
-      clearTimeout(silenceTimerRef.current);
-      silenceTimerRef.current = null;
-    }
+  // Recording session state — all refs so Voice handlers see latest values
+  const activeRef = useRef(false);      // recording session is live
+  const stoppingRef = useRef(false);    // finalization requested
+  const accumulatedRef = useRef('');    // text accumulated across sentence restarts
+  const currentLangRef = useRef('');
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const recordingRef = useRef<Audio.Recording | null>(null);  // Whisper only
+
+  const clearTimer = useCallback(() => {
+    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+  }, []);
+
+  // fnRef holds functions that must always be latest — used inside Voice event handlers
+  const fnRef = useRef({ finalize: () => {}, resetTimer: () => {} });
+
+  fnRef.current.finalize = () => {
+    clearTimer();
+    const text = accumulatedRef.current.trim();
+    accumulatedRef.current = '';
+    setPartialText('');
+    activeRef.current = false;
+    stoppingRef.current = false;
+    setState('idle');
+    if (text) optsRef.current.onTranscript(text);
   };
 
-  const startSilenceTimer = (stopFn: () => void) => {
-    clearSilenceTimer();
-    silenceTimerRef.current = setTimeout(() => {
-      if (voiceActiveRef.current) stopFn();
-    }, 6000);
+  fnRef.current.resetTimer = () => {
+    clearTimer();
+    // After SILENCE_MS of no new partial results, auto-stop
+    timerRef.current = setTimeout(() => {
+      if (!activeRef.current || stoppingRef.current) return;
+      stoppingRef.current = true;
+      Voice?.stop().catch(() => {});
+      // Fallback: if onSpeechResults never fires after stop, finalize anyway
+      timerRef.current = setTimeout(() => {
+        if (stoppingRef.current) fnRef.current.finalize();
+      }, 2000);
+    }, SILENCE_MS);
   };
 
-  // Setup Voice listeners
+  // Register Voice event handlers once — fnRef keeps them fresh
   useEffect(() => {
     if (!Voice) return;
 
     Voice.onSpeechStart = () => {
       setState('recording');
-      startSilenceTimer(() => Voice.stop().catch(() => {}));
+      fnRef.current.resetTimer();
     };
-    Voice.onSpeechEnd = () => {
-      clearSilenceTimer();
-      if (voiceActiveRef.current) setState('processing');
-    };
-    Voice.onSpeechResults = (e: any) => {
-      clearSilenceTimer();
-      const text = e.value?.[0]?.trim();
-      if (!text) return;
 
-      if (voiceActiveRef.current) {
-        // Buton hâlâ basılı → biriktir ve yeniden başlat
-        accumulatedTextRef.current = (accumulatedTextRef.current + ' ' + text).trim();
-        setPartialText(accumulatedTextRef.current);
-        // Yeni cümle için yeniden başlat
-        Voice.start(toLocale(currentLangRef.current)).catch(() => {});
-        setState('recording');
-      } else {
-        // Buton bırakıldı → son segment + tümünü gönder
-        const finalText = (accumulatedTextRef.current + ' ' + text).trim();
-        if (finalText) opts.onTranscript(finalText);
-        accumulatedTextRef.current = '';
-        setPartialText('');
-        setState('idle');
-      }
-    };
     Voice.onSpeechPartialResults = (e: any) => {
-      const text = e.value?.[0]?.trim();
-      if (text) {
-        setPartialText(text);
-        opts.onPartial?.(text);
-        // Reset 3s silence timer on each new partial result
-        startSilenceTimer(() => Voice.stop().catch(() => {}));
-      }
-    };
-    Voice.onSpeechError = (e: any) => {
-      const msg = e.error?.message || '';
-      const code = e.error?.code || '';
-      // Ignore "no match" / user-stopped errors
-      if (msg.includes('7') || msg.includes('No match') || code === '7') {
-        setState('idle');
-      } else if (
-        msg.includes('9') || code === '9' || // INSUFFICIENT_PERMISSIONS
-        msg.includes('13') || code === '13' || // LANGUAGE_NOT_SUPPORTED
-        msg.includes('11') || code === '11' || // LANGUAGE_NOT_AVAILABLE
-        msg.toLowerCase().includes('language') ||
-        msg.toLowerCase().includes('not support')
-      ) {
-        opts.onError?.(
-          'Bu dil Web Speech ile desteklenmiyor.\nAyarlar → Ses Tanıma → OpenAI Whisper seçin.'
-        );
-        setState('error');
-        setTimeout(() => setState('idle'), 4000);
-      } else {
-        opts.onError?.(msg || 'Ses tanıma hatası.');
-        setState('error');
-        setTimeout(() => setState('idle'), 3000);
-      }
-      voiceActiveRef.current = false;
+      const partial = (e.value?.[0] ?? '').trim();
+      if (!partial) return;
+      const display = (accumulatedRef.current + ' ' + partial).trim();
+      setPartialText(display);
+      optsRef.current.onPartial?.(display);
+      fnRef.current.resetTimer();  // reset 5s silence window
     };
 
-    return () => {
-      Voice.destroy().catch(() => {});
-    };
-  }, []);
+    Voice.onSpeechResults = (e: any) => {
+      clearTimer();
+      const text = (e.value?.[0] ?? '').trim();
 
-  const startListening = useCallback(async (lang: string = '') => {
-    if (state !== 'idle') return;
-
-    const voiceSettings = await getVoiceSettings();
-
-    // ── OpenAI Whisper engine ──
-    if (voiceSettings.engine === 'whisper-openai') {
-      if (!voiceSettings.openaiApiKey) {
-        opts.onError?.('OpenAI API anahtarı eksik. Ayarlar → Ses tanıma → API Anahtarı girin.');
-        setState('error');
-        setTimeout(() => setState('idle'), 3000);
+      if (!activeRef.current || stoppingRef.current) {
+        // Finalization path (silence timer fired or user tapped stop)
+        if (text) accumulatedRef.current = (accumulatedRef.current + ' ' + text).trim();
+        fnRef.current.finalize();
         return;
       }
 
-      setState('requesting');
+      // Still active → accumulate sentence + restart for next sentence
+      if (text) {
+        accumulatedRef.current = (accumulatedRef.current + ' ' + text).trim();
+        setPartialText(accumulatedRef.current);
+      }
+      Voice.start(toLocale(currentLangRef.current)).catch(() => {});
+      fnRef.current.resetTimer();
+    };
+
+    Voice.onSpeechEnd = () => {
+      // Segment ended — onSpeechResults or onSpeechError will follow
+    };
+
+    Voice.onSpeechError = (e: any) => {
+      const code = String(e.error?.code ?? '');
+      const msg = String(e.error?.message ?? '');
+      // Error 7 = no speech / silence — normal between sentences, just restart
+      const isSilence =
+        code === '7' ||
+        msg.startsWith('7/') ||
+        msg.toLowerCase().includes('no match') ||
+        msg.toLowerCase().includes('no speech');
+
+      if (isSilence) {
+        if (activeRef.current && !stoppingRef.current) {
+          Voice.start(toLocale(currentLangRef.current)).catch(() => {});
+          // Timer keeps running — 5s since last partial
+        } else {
+          fnRef.current.finalize();
+        }
+        return;
+      }
+
+      // Real error
+      clearTimer();
+      activeRef.current = false;
+      stoppingRef.current = false;
+      accumulatedRef.current = '';
+      setPartialText('');
+      setState('error');
+      const errMsg = msg.replace(/^\d+\//, '');
+      optsRef.current.onError?.(errMsg || 'Ses tanıma hatası.');
+      setTimeout(() => setState('idle'), 3000);
+    };
+
+    return () => { Voice.destroy().catch(() => {}); };
+  }, [clearTimer]);
+
+  const startListening = useCallback(async (lang: string = '') => {
+    const settings = await getVoiceSettings();
+
+    // ── OpenAI Whisper path ──
+    if (settings.engine === 'whisper-openai') {
+      if (!settings.openaiApiKey) {
+        optsRef.current.onError?.('OpenAI API anahtarı eksik. Ayarlar → Ses tanıma.');
+        return;
+      }
+      if (recordingRef.current) return;
+
+      currentLangRef.current = lang;
+      setState('recording');
       try {
         const { status } = await Audio.requestPermissionsAsync();
-        if (status !== 'granted') {
-          setState('error');
-          setTimeout(() => setState('idle'), 3000);
-          return;
-        }
+        if (status !== 'granted') { setState('idle'); return; }
         await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
-        const recording = new Audio.Recording();
-        await recording.prepareToRecordAsync({
-          android: {
-            extension: '.wav',
-            outputFormat: Audio.AndroidOutputFormat.DEFAULT,
-            audioEncoder: Audio.AndroidAudioEncoder.DEFAULT,
-            sampleRate: 16000,
-            numberOfChannels: 1,
-            bitRate: 128000,
-          },
-          ios: {
-            extension: '.wav',
-            audioQuality: Audio.IOSAudioQuality.HIGH,
-            sampleRate: 16000,
-            numberOfChannels: 1,
-            bitRate: 128000,
-            linearPCMBitDepth: 16,
-            linearPCMIsBigEndian: false,
-            linearPCMIsFloat: false,
-          },
+        const rec = new Audio.Recording();
+        await rec.prepareToRecordAsync({
+          android: { extension: '.wav', outputFormat: Audio.AndroidOutputFormat.DEFAULT, audioEncoder: Audio.AndroidAudioEncoder.DEFAULT, sampleRate: 16000, numberOfChannels: 1, bitRate: 128000 },
+          ios: { extension: '.wav', audioQuality: Audio.IOSAudioQuality.HIGH, sampleRate: 16000, numberOfChannels: 1, bitRate: 128000, linearPCMBitDepth: 16, linearPCMIsBigEndian: false, linearPCMIsFloat: false },
           web: { mimeType: 'audio/wav', bitsPerSecond: 128000 },
         });
-        await recording.startAsync();
-        recordingRef.current = recording;
-        setState('recording');
-      } catch (err: any) {
-        opts.onError?.('Kayıt başlatılamadı: ' + err.message);
+        await rec.startAsync();
+        recordingRef.current = rec;
+      } catch {
+        optsRef.current.onError?.('Kayıt başlatılamadı.');
         setState('error');
         setTimeout(() => setState('idle'), 3000);
       }
       return;
     }
 
-    // ── Web Speech (Android native via @react-native-voice/voice) ──
+    // ── Web Speech (Android native) ──
     if (!Voice) {
-      opts.onError?.('Google ses tanıma yüklü değil. Ayarlar → Ses Tanıma → Whisper motorunu deneyin.');
-      setState('error');
-      setTimeout(() => setState('idle'), 3000);
+      optsRef.current.onError?.('Ses tanıma yüklü değil.');
       return;
     }
+    if (activeRef.current) return;
 
     currentLangRef.current = lang;
-    accumulatedTextRef.current = '';
-    setState('requesting');
+    accumulatedRef.current = '';
+    stoppingRef.current = false;
+    activeRef.current = true;
+    setPartialText('');
+    setState('recording');
+
     try {
       await Voice.start(toLocale(lang));
-      voiceActiveRef.current = true;
-      setState('recording');
-    } catch (err: any) {
-      opts.onError?.('Ses tanıma başlatılamadı: ' + err.message);
+    } catch {
+      optsRef.current.onError?.('Ses tanıma başlatılamadı.');
       setState('error');
+      activeRef.current = false;
       setTimeout(() => setState('idle'), 3000);
     }
-  }, [state, opts]);
+  }, []);
 
-  const stopListening = useCallback(async (lang: string = 'en') => {
-    const voiceSettings = await getVoiceSettings();
+  const stopListening = useCallback(async () => {
+    const settings = await getVoiceSettings();
 
-    // OpenAI Whisper — stop recording and transcribe
-    if (voiceSettings.engine === 'whisper-openai') {
-      const recording = recordingRef.current;
-      if (!recording || state !== 'recording') return;
-
+    // ── Whisper stop: finalize recording ──
+    if (settings.engine === 'whisper-openai') {
+      const rec = recordingRef.current;
+      if (!rec) return;
       setState('processing');
       try {
-        await recording.stopAndUnloadAsync();
+        await rec.stopAndUnloadAsync();
         await Audio.setAudioModeAsync({ allowsRecordingIOS: false });
-        const uri = recording.getURI();
+        const uri = rec.getURI();
         recordingRef.current = null;
-        if (!uri) throw new Error('Kayıt URI bulunamadı');
-
-        const settings = await getVoiceSettings();
-        const transcript = await transcribeWithOpenAI(uri, lang, settings.openaiApiKey);
-        if (transcript) {
-          opts.onTranscript(transcript);
-          setPartialText('');
-        }
+        if (!uri) throw new Error('URI bulunamadı');
+        const s = await getVoiceSettings();
+        const text = await transcribeWithOpenAI(uri, currentLangRef.current, s.openaiApiKey);
+        if (text) { setPartialText(''); optsRef.current.onTranscript(text); }
         setState('idle');
       } catch (err: any) {
-        opts.onError?.(err.message || 'Ses tanıma başarısız');
+        optsRef.current.onError?.(err.message || 'Ses tanıma başarısız.');
         setState('error');
+        recordingRef.current = null;
         setTimeout(() => setState('idle'), 3000);
       }
       return;
     }
 
-    // Native Voice — stop and let onSpeechResults handle the result
-    if (Voice && voiceActiveRef.current) {
-      try {
-        await Voice.stop();
-      } catch {}
+    // ── Web speech stop ──
+    if (!activeRef.current || stoppingRef.current) return;
+    clearTimer();
+    stoppingRef.current = true;
+    setState('processing');
+    try {
+      await Voice?.stop();
+    } catch {
+      fnRef.current.finalize();
     }
-  }, [state, opts]);
+  }, [clearTimer]);
 
   const cancelListening = useCallback(async () => {
-    clearSilenceTimer();
-    accumulatedTextRef.current = '';
-    if (Voice) {
-      try { await Voice.cancel(); } catch {}
-    }
+    clearTimer();
+    activeRef.current = false;
+    stoppingRef.current = false;
+    accumulatedRef.current = '';
+    setPartialText('');
+    if (Voice) { try { await Voice.cancel(); } catch {} }
     if (recordingRef.current) {
       try { await recordingRef.current.stopAndUnloadAsync(); } catch {}
       recordingRef.current = null;
     }
-    voiceActiveRef.current = false;
     setState('idle');
-    setPartialText('');
-  }, []);
+  }, [clearTimer]);
 
-  useEffect(() => {
-    return () => {
-      recordingRef.current?.stopAndUnloadAsync().catch(() => {});
-    };
-  }, []);
+  useEffect(() => () => { clearTimer(); }, [clearTimer]);
 
   return {
     state,
