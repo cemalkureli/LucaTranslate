@@ -46,6 +46,7 @@ function WaveBar({ index, isRecording, isProcessing }: {
       cancelAnimation(height);
       height.value = withTiming(4, { duration: 220 });
     }
+    return () => { cancelAnimation(height); };
   }, [isRecording]);
 
   const barStyle = useAnimatedStyle(() => ({ height: height.value }));
@@ -81,6 +82,7 @@ export default function VoiceModal({
       cancelAnimation(glow);
       glow.value = withTiming(0, { duration: 280 });
     }
+    return () => { cancelAnimation(glow); };
   }, [isRecording]);
 
   const glowStyle = useAnimatedStyle(() => ({
@@ -243,7 +245,7 @@ export default function VoiceModal({
           )}
 
           {isRecording && (
-            <Text style={styles.hint}>5 sn sessizlik → otomatik durur</Text>
+            <Text style={styles.hint}>3 sn sessizlik → otomatik durur</Text>
           )}
         </View>
       </View>

@@ -3,6 +3,7 @@ import {
   View, Text, StyleSheet, TouchableOpacity, FlatList,
   ActivityIndicator, Image, Alert, ScrollView, BackHandler,
 } from 'react-native';
+import * as Speech from 'expo-speech';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as ImagePicker from 'expo-image-picker';
@@ -61,6 +62,7 @@ export default function CameraScreen() {
   const [currentItem, setCurrentItem] = useState<OcrHistoryItem | null>(null);
   const [viewingItem, setViewingItem] = useState<OcrHistoryItem | null>(null);
   const [showLangPicker, setShowLangPicker] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
 
   const { settings } = useTranslatorStore();
   const globalTargetLang = useTranslatorStore(s => s.targetLang);
@@ -114,10 +116,9 @@ export default function CameraScreen() {
     try {
       const snapshot = await visionCameraRef.current.takeSnapshot({
         quality: 20,
-        skipMetadata: true,
       });
-      const uri = `file://${snapshot.path}`;
-      const mlResult = await TextRecognition.recognize(uri, TextRecognitionScript.LATIN);
+      const path = snapshot.path.startsWith('file://') ? snapshot.path : `file://${snapshot.path}`;
+      const mlResult = await TextRecognition.recognize(path, TextRecognitionScript.LATIN);
       const text = mlResult.text?.trim();
 
       // Use ref for deduplication — no stale closure
@@ -158,6 +159,8 @@ export default function CameraScreen() {
     if (!liveScan) return;
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
       setLiveScan(false);
+      Speech.stop();
+      setIsSpeaking(false);
       return true;
     });
     return () => sub.remove();
@@ -318,10 +321,23 @@ export default function CameraScreen() {
                 <Text style={styles.liveOriginalText} numberOfLines={2}>{liveDetected}</Text>
               ) : null}
               <View style={styles.liveDivider} />
-              <View style={styles.liveTranslationRow}>
+              <TouchableOpacity
+                style={styles.liveTranslationRow}
+                activeOpacity={0.7}
+                onPress={() => {
+                  if (isSpeaking) { Speech.stop(); setIsSpeaking(false); return; }
+                  setIsSpeaking(true);
+                  Speech.speak(liveTranslation, {
+                    language: localTargetLang,
+                    onDone: () => setIsSpeaking(false),
+                    onError: () => setIsSpeaking(false),
+                  });
+                }}
+              >
                 <Text style={styles.liveLangFlagSmall}>{langData?.flag ?? '🌐'}</Text>
                 <Text style={styles.liveTranslatedText} numberOfLines={4}>{liveTranslation}</Text>
-              </View>
+                <Text style={{ fontSize: 18, marginLeft: 6 }}>{isSpeaking ? '🔊' : '🔈'}</Text>
+              </TouchableOpacity>
             </View>
           ) : (
             <Text style={styles.liveHint}>

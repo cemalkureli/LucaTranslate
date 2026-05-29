@@ -10,7 +10,7 @@ export interface VoiceSettings {
 }
 
 const VOICE_SETTINGS_KEY = 'lingua_voice_settings';
-const SILENCE_MS = 5000;   // 5s of no new speech → auto-stop
+const SILENCE_MS = 3000;   // 3s of no new speech → auto-stop
 const CHECK_INTERVAL = 300; // check every 300ms
 
 const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
@@ -93,11 +93,12 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
   const activeRef = useRef(false);
   const stoppingRef = useRef(false);
   const accumulatedRef = useRef('');
+  const lastPartialRef = useRef('');
   const currentLangRef = useRef('');
   const recordingRef = useRef<Audio.Recording | null>(null);
+  const recognizerActiveRef = useRef(false);
+  const pendingRestartRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Silence detection via interval + timestamp (robust across Android restarts)
-  // lastSpeechRef tracks when we last received actual speech (partial or results)
   const lastSpeechRef = useRef(0);
   const silenceIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -108,13 +109,22 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
     }
   }, []);
 
+  const clearPendingRestart = useCallback(() => {
+    if (pendingRestartRef.current) {
+      clearTimeout(pendingRestartRef.current);
+      pendingRestartRef.current = null;
+    }
+  }, []);
+
   // fnRef: always-fresh functions for use inside Voice event handlers
   const fnRef = useRef({ finalize: () => {}, triggerStop: () => {} });
 
   fnRef.current.finalize = () => {
     clearSilenceCheck();
-    const text = accumulatedRef.current.trim();
+    clearPendingRestart();
+    const text = accumulatedRef.current.trim() || lastPartialRef.current.trim();
     accumulatedRef.current = '';
+    lastPartialRef.current = '';
     setPartialText('');
     activeRef.current = false;
     stoppingRef.current = false;
@@ -126,8 +136,14 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
     if (!activeRef.current || stoppingRef.current) return;
     stoppingRef.current = true;
     clearSilenceCheck();
-    Voice?.stop().catch(() => {});
-    // Fallback: if onSpeechResults never fires after Voice.stop(), finalize anyway
+    clearPendingRestart();
+    if (recognizerActiveRef.current) {
+      recognizerActiveRef.current = false;
+      try { Voice?.stop().catch(() => {}); } catch {}
+    } else {
+      fnRef.current.finalize();
+      return;
+    }
     setTimeout(() => { if (stoppingRef.current) fnRef.current.finalize(); }, 2000);
   };
 
@@ -149,20 +165,28 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
     if (!Voice) return;
 
     Voice.onSpeechStart = () => {
+      // Stale start from a cancelled session — kill it immediately
+      if (!activeRef.current) {
+        try { Voice.cancel().catch(() => {}); } catch {}
+        return;
+      }
+      recognizerActiveRef.current = true;
       setState('recording');
-      // Do NOT reset lastSpeechRef here — only actual speech resets the silence clock
     };
 
     Voice.onSpeechPartialResults = (e: any) => {
+      if (!activeRef.current) return;
       const partial = (e.value?.[0] ?? '').trim();
       if (!partial) return;
       const display = (accumulatedRef.current + ' ' + partial).trim();
+      lastPartialRef.current = display;
       setPartialText(display);
       optsRef.current.onPartial?.(display);
-      lastSpeechRef.current = Date.now();  // ← Reset 5s silence window on every partial
+      lastSpeechRef.current = Date.now();
     };
 
     Voice.onSpeechResults = (e: any) => {
+      recognizerActiveRef.current = false;
       const text = (e.value?.[0] ?? '').trim();
 
       if (!activeRef.current || stoppingRef.current) {
@@ -172,14 +196,18 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
         return;
       }
 
-      // Android stopped mid-session (its own silence detection) → accumulate + restart
-      // The silence interval keeps running — no need to reset lastSpeechRef unless text found
+      // Android stopped mid-session — accumulate + restart
       if (text) {
         accumulatedRef.current = (accumulatedRef.current + ' ' + text).trim();
         setPartialText(accumulatedRef.current);
-        lastSpeechRef.current = Date.now();  // Speech was confirmed, reset clock
+        lastSpeechRef.current = Date.now();
       }
-      Voice.start(toLocale(currentLangRef.current), ANDROID_OPTS).catch(() => {});
+      clearPendingRestart();
+      pendingRestartRef.current = setTimeout(() => {
+        pendingRestartRef.current = null;
+        if (!activeRef.current || stoppingRef.current) return;
+        try { Voice.start(toLocale(currentLangRef.current), ANDROID_OPTS).catch(() => {}); } catch {}
+      }, 100);
     };
 
     Voice.onSpeechEnd = () => {
@@ -187,30 +215,46 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
     };
 
     Voice.onSpeechError = (e: any) => {
+      recognizerActiveRef.current = false;
       const code = String(e.error?.code ?? '');
       const msg = String(e.error?.message ?? '');
-      // Error 7 = no speech / no match — normal silence between restarts, just restart
       const isSilence =
         code === '7' ||
         msg.startsWith('7/') ||
         msg.toLowerCase().includes('no match') ||
         msg.toLowerCase().includes('no speech');
+      // ERROR_RECOGNIZER_BUSY: previous session still alive, cancel and retry with longer gap
+      const isBusy = code === '8';
 
-      if (isSilence) {
+      if (isSilence || isBusy) {
         if (activeRef.current && !stoppingRef.current) {
-          // Restart immediately — silence interval keeps counting from lastSpeechRef
-          Voice.start(toLocale(currentLangRef.current), ANDROID_OPTS).catch(() => {});
+          const delay = isBusy ? 350 : 100;
+          clearPendingRestart();
+          pendingRestartRef.current = setTimeout(async () => {
+            pendingRestartRef.current = null;
+            if (!activeRef.current || stoppingRef.current) return;
+            if (isBusy) try { await Voice.cancel().catch(() => {}); } catch {}
+            try { Voice.start(toLocale(currentLangRef.current), ANDROID_OPTS).catch(() => {}); } catch {}
+          }, delay);
         } else {
           fnRef.current.finalize();
         }
         return;
       }
 
+      // Any error while intentionally stopping → treat as normal stop, don't lose text
+      if (stoppingRef.current) {
+        fnRef.current.finalize();
+        return;
+      }
+
       // Real error
       clearSilenceCheck();
+      clearPendingRestart();
       activeRef.current = false;
       stoppingRef.current = false;
       accumulatedRef.current = '';
+      lastPartialRef.current = '';
       setPartialText('');
       setState('error');
       const errMsg = msg.replace(/^\d+\//, '');
@@ -264,9 +308,10 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
     accumulatedRef.current = '';
     stoppingRef.current = false;
     activeRef.current = true;
+    recognizerActiveRef.current = false;
     setPartialText('');
     setState('recording');
-    startSilenceCheck();  // Start 5s silence detection
+    startSilenceCheck();
 
     try {
       await Voice.start(toLocale(lang), ANDROID_OPTS);
@@ -312,9 +357,11 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
 
   const cancelListening = useCallback(async () => {
     clearSilenceCheck();
+    clearPendingRestart();
     activeRef.current = false;
     stoppingRef.current = false;
     accumulatedRef.current = '';
+    lastPartialRef.current = '';
     setPartialText('');
     if (Voice) { try { await Voice.cancel(); } catch {} }
     if (recordingRef.current) {
@@ -324,7 +371,7 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
     setState('idle');
   }, [clearSilenceCheck]);
 
-  useEffect(() => () => { clearSilenceCheck(); }, [clearSilenceCheck]);
+  useEffect(() => () => { clearSilenceCheck(); clearPendingRestart(); }, [clearSilenceCheck, clearPendingRestart]);
 
   return {
     state,
