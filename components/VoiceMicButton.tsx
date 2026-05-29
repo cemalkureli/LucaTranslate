@@ -23,16 +23,13 @@ import { MicIcon, StopIcon } from './Icons';
 
 interface VoiceMicButtonProps {
   state: VoiceState;
-  onPressIn: () => void;
-  onPressOut: () => void;
-  onLongPress?: () => void;
+  onPress: () => void;
   size?: number;
 }
 
 export default function VoiceMicButton({
   state,
-  onPressIn,
-  onPressOut,
+  onPress,
   size = 64,
 }: VoiceMicButtonProps) {
   const pulse1 = useSharedValue(1);
@@ -120,8 +117,7 @@ export default function VoiceMicButton({
       {/* Main button */}
       <Animated.View style={btnStyle}>
         <Pressable
-          onPressIn={onPressIn}
-          onPressOut={onPressOut}
+          onPress={onPress}
           style={({ pressed }) => [
             styles.btn,
             { width: size, height: size, borderRadius: size / 2 },

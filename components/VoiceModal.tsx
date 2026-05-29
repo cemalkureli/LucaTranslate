@@ -3,7 +3,7 @@ import {
   View, Text, StyleSheet, Modal, TouchableOpacity, Pressable, ScrollView,
 } from 'react-native';
 import Animated, {
-  useSharedValue, useAnimatedStyle, withRepeat, withTiming,
+  useSharedValue, useAnimatedStyle, withRepeat, withTiming, withSequence,
   withSpring, interpolate, Easing, cancelAnimation,
 } from 'react-native-reanimated';
 import { BlurView } from 'expo-blur';
@@ -16,7 +16,10 @@ interface VoiceModalProps {
   visible: boolean;
   state: VoiceState;
   sourceLang: string;
+  targetLang?: string;
   partialText?: string;
+  recognizedText?: string;
+  translatedText?: string;
   onStartPress: () => void;
   onStopPress: () => void;
   onClose: () => void;
@@ -26,14 +29,11 @@ interface VoiceModalProps {
 
 const BAR_COUNT = 24;
 
-// Each bar is its own component so hooks are called at component level (not in a loop)
 function WaveBar({ index, isRecording, isProcessing }: {
   index: number; isRecording: boolean; isProcessing: boolean;
 }) {
   const height = useSharedValue(4);
-  const center = BAR_COUNT / 2;
-  const dist = Math.abs(index - center) / center;
-  const targetH = 8 + ((index * 17 + 11) % 28); // deterministic, no Math.random
+  const targetH = 8 + ((index * 17 + 11) % 28);
 
   useEffect(() => {
     if (isRecording) {
@@ -49,53 +49,30 @@ function WaveBar({ index, isRecording, isProcessing }: {
   }, [isRecording]);
 
   const barStyle = useAnimatedStyle(() => ({ height: height.value }));
-
+  const center = BAR_COUNT / 2;
+  const dist = Math.abs(index - center) / center;
   const color = isProcessing
     ? Colors.accent.cyan
     : isRecording
     ? `rgba(244,114,182,${(1 - dist * 0.45).toFixed(2)})`
     : Colors.bg.cardBorder;
 
-  return (
-    <Animated.View style={[styles.waveBar, barStyle, { backgroundColor: color }]} />
-  );
-}
-
-// Engine indicator (reads AsyncStorage)
-function EngineHint() {
-  const [engine, setEngine] = React.useState('...');
-  useEffect(() => {
-    import('../hooks/useVoiceRecorder').then(({ getVoiceSettings }) => {
-      getVoiceSettings().then(s => {
-        const labels: Record<string, string> = {
-          'web-speech': 'Web Speech API',
-          'whisper-openai': 'OpenAI Whisper',
-          'whisper-local': 'Local Whisper',
-        };
-        setEngine(labels[s.engine] || s.engine);
-      });
-    });
-  }, []);
-  return <Text style={styles.engineHint}>Motor: {engine}</Text>;
+  return <Animated.View style={[styles.waveBar, barStyle, { backgroundColor: color }]} />;
 }
 
 export default function VoiceModal({
-  visible, state, sourceLang, partialText = '',
+  visible, state, sourceLang, targetLang = 'en',
+  partialText = '', recognizedText = '', translatedText = '',
   onStartPress, onStopPress, onClose, onSettingsPress, onLangSelect,
 }: VoiceModalProps) {
   const isRecording = state === 'recording';
   const isProcessing = state === 'processing';
+  const sourceLangData = LANGUAGES.find(l => l.code === sourceLang) || LANGUAGES[7];
+  const targetLangData = LANGUAGES.find(l => l.code === targetLang);
 
-
-  const lang = LANGUAGES.find(l => l.code === sourceLang) || LANGUAGES[7];
-
-  // Mic button scale
   const btnScale = useSharedValue(1);
-  const btnStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: btnScale.value }],
-  }));
+  const btnStyle = useAnimatedStyle(() => ({ transform: [{ scale: btnScale.value }] }));
 
-  // Glow ring pulse when recording
   const glow = useSharedValue(0);
   useEffect(() => {
     if (isRecording) {
@@ -111,17 +88,20 @@ export default function VoiceModal({
     transform: [{ scale: interpolate(glow.value, [0, 1], [1, 1.15]) }],
   }));
 
-  const stateLabel = () => {
-    if (state === 'recording') return 'Dinliyorum... 5 sn sessizlikte otomatik durur';
-    if (state === 'processing') return 'Ses analiz ediliyor...';
-    if (state === 'error') return 'Ses tanıma hatası.';
-    if (sourceLang === 'auto') return 'Konuşma dilinizi seçin';
-    return 'Mikrofona dokunun';
-  };
+  const displayText = isRecording || isProcessing ? partialText : (recognizedText || partialText);
+  const showTranslation = !!translatedText && !isRecording && !isProcessing;
+
+  const stateLabel =
+    state === 'recording' ? 'Dinliyorum...' :
+    state === 'processing' ? 'Analiz ediliyor...' :
+    state === 'error' ? 'Ses tanıma hatası.' :
+    sourceLang === 'auto' ? 'Konuşma dilinizi seçin' :
+    showTranslation ? 'Tekrar konuşmak için mikrofona dokunun' :
+    'Mikrofona dokunun';
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <Pressable style={styles.backdrop} onPress={isRecording ? undefined : onClose}>
+      <Pressable style={styles.backdrop} onPress={onClose}>
         <BlurView intensity={22} style={StyleSheet.absoluteFillObject} tint="dark" />
       </Pressable>
 
@@ -129,23 +109,19 @@ export default function VoiceModal({
         <View style={styles.sheet}>
           <View style={styles.handle} />
 
-          {/* Header row */}
+          {/* Header */}
           <View style={styles.header}>
             <View style={styles.langBadge}>
-              <Text style={styles.langFlag}>{lang.flag}</Text>
-              <Text style={styles.langName}>{lang.nativeName}</Text>
+              <Text style={styles.langFlag}>{sourceLangData.flag}</Text>
+              <Text style={styles.langName}>{sourceLangData.nativeName}</Text>
               {sourceLang === 'auto' && <Text style={styles.autoTag}>auto</Text>}
             </View>
-            <TouchableOpacity
-              onPress={onClose}
-              style={styles.closeBtn}
-              disabled={isRecording}
-            >
-              <CloseIcon size={14} color={isRecording ? Colors.text.muted : Colors.text.secondary} />
+            <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
+              <CloseIcon size={14} color={Colors.text.secondary} />
             </TouchableOpacity>
           </View>
 
-          {/* Auto mode: show full language picker, hide mic */}
+          {/* Auto mode: language picker */}
           {sourceLang === 'auto' && !isRecording && !isProcessing ? (
             <View style={styles.autoLangPicker}>
               <Text style={styles.autoLangTitle}>Konuşma dilinizi seçin</Text>
@@ -169,24 +145,19 @@ export default function VoiceModal({
             </View>
           ) : (
             <>
-              {/* Waveform visualizer */}
+              {/* Waveform */}
               <View style={styles.waveformOuter}>
                 <View style={styles.waveform}>
                   {Array.from({ length: BAR_COUNT }, (_, i) => (
-                    <WaveBar
-                      key={i}
-                      index={i}
-                      isRecording={isRecording}
-                      isProcessing={isProcessing}
-                    />
+                    <WaveBar key={i} index={i} isRecording={isRecording} isProcessing={isProcessing} />
                   ))}
                 </View>
               </View>
 
-              {/* Live transcript */}
+              {/* Transcript */}
               <View style={styles.transcriptBox}>
-                {partialText ? (
-                  <Text style={styles.partialText} numberOfLines={3}>"{partialText}"</Text>
+                {displayText ? (
+                  <Text style={styles.partialText} numberOfLines={3}>{displayText}</Text>
                 ) : isRecording ? (
                   <Text style={styles.listeningText}>🎙 Sizi dinliyorum...</Text>
                 ) : isProcessing ? (
@@ -196,7 +167,20 @@ export default function VoiceModal({
                 )}
               </View>
 
-              {/* Big mic button */}
+              {/* Translation result — shown after recording stops */}
+              {showTranslation && (
+                <View style={styles.translationBox}>
+                  {targetLangData && (
+                    <View style={styles.translationHeader}>
+                      <Text style={styles.translationFlag}>{targetLangData.flag}</Text>
+                      <Text style={styles.translationLang}>{targetLangData.nativeName}</Text>
+                    </View>
+                  )}
+                  <Text style={styles.translationText}>{translatedText}</Text>
+                </View>
+              )}
+
+              {/* Mic button */}
               <View style={styles.btnArea}>
                 {(isRecording || isProcessing) && (
                   <Animated.View style={[
@@ -208,11 +192,13 @@ export default function VoiceModal({
                 <Animated.View style={btnStyle}>
                   <Pressable
                     onPress={() => {
+                      btnScale.value = withSequence(
+                        withSpring(0.85, { damping: 15 }),
+                        withSpring(1, { damping: 10 })
+                      );
                       if (!isRecording && !isProcessing) onStartPress();
                       else if (isRecording) onStopPress();
                     }}
-                    onPressIn={() => { btnScale.value = withSpring(0.88, { damping: 10 }); }}
-                    onPressOut={() => { btnScale.value = withSpring(1, { damping: 10 }); }}
                     style={styles.micBtn}
                   >
                     <LinearGradient
@@ -237,14 +223,14 @@ export default function VoiceModal({
             </>
           )}
 
-          {/* State text */}
+          {/* State label */}
           <Text style={[
             styles.stateLabel,
             isRecording && { color: '#F472B6' },
             isProcessing && { color: Colors.accent.cyan },
             state === 'error' && { color: '#F87171' },
           ]}>
-            {stateLabel()}
+            {stateLabel}
           </Text>
 
           {state === 'error' && (
@@ -256,13 +242,9 @@ export default function VoiceModal({
             </TouchableOpacity>
           )}
 
-          {state !== 'error' && (
-            <Text style={styles.hint}>
-              {isRecording ? '5 sn sessizlik sonrası otomatik kapanır' : `${lang.nativeName} dilinde konuşun`}
-            </Text>
+          {isRecording && (
+            <Text style={styles.hint}>5 sn sessizlik → otomatik durur</Text>
           )}
-
-          <EngineHint />
         </View>
       </View>
     </Modal>
@@ -305,7 +287,6 @@ const styles = StyleSheet.create({
     backgroundColor: Colors.bg.card, justifyContent: 'center', alignItems: 'center',
     borderWidth: 1, borderColor: Colors.bg.cardBorder,
   },
-  closeIcon: { color: Colors.text.secondary, fontSize: 14 },
 
   waveformOuter: {
     height: 68, justifyContent: 'center',
@@ -318,42 +299,51 @@ const styles = StyleSheet.create({
   waveBar: { width: 3.5, borderRadius: 3, minHeight: 4 },
 
   transcriptBox: {
-    minHeight: 52, paddingHorizontal: 28,
+    minHeight: 48, paddingHorizontal: 28,
     justifyContent: 'center', alignItems: 'center', marginBottom: 4,
   },
   partialText: {
     fontSize: 16, color: Colors.text.primary,
-    textAlign: 'center', lineHeight: 24, fontStyle: 'italic',
+    textAlign: 'center', lineHeight: 24,
   },
   listeningText: { fontSize: 14, color: '#F472B6', fontWeight: '600' },
   processingText: { fontSize: 14, color: Colors.accent.cyan, fontWeight: '600' },
   idleText: { fontSize: 13, color: Colors.text.muted },
 
+  translationBox: {
+    marginHorizontal: 20, marginBottom: 8,
+    padding: 14, backgroundColor: Colors.accent.primary + '12',
+    borderRadius: BorderRadius.xl,
+    borderWidth: 1, borderColor: Colors.accent.primary + '30',
+    gap: 6,
+  },
+  translationHeader: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  translationFlag: { fontSize: 15 },
+  translationLang: { fontSize: 11, color: Colors.accent.secondary, fontWeight: '600' },
+  translationText: {
+    fontSize: 18, color: Colors.text.primary, lineHeight: 26, fontWeight: '400',
+  },
+
   btnArea: {
-    alignItems: 'center', justifyContent: 'center', height: 128,
+    alignItems: 'center', justifyContent: 'center', height: 120,
   },
   glowRing: {
     position: 'absolute', width: 118, height: 118, borderRadius: 59,
   },
   micBtn: {
-    width: 90, height: 90, borderRadius: 45, overflow: 'hidden',
+    width: 88, height: 88, borderRadius: 44, overflow: 'hidden',
     shadowColor: '#6C63FF', shadowOffset: { width: 0, height: 6 },
     shadowOpacity: 0.5, shadowRadius: 20, elevation: 14,
   },
   micGrad: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  micEmoji: { fontSize: 38 },
 
   stateLabel: {
-    textAlign: 'center', fontSize: 14, color: Colors.text.muted,
-    fontWeight: '500', marginTop: 10,
+    textAlign: 'center', fontSize: 13, color: Colors.text.muted,
+    fontWeight: '500', marginTop: 8,
   },
   hint: {
-    textAlign: 'center', fontSize: 12, color: Colors.text.muted,
-    marginTop: 6, paddingHorizontal: 36, lineHeight: 18,
-  },
-  engineHint: {
-    textAlign: 'center', fontSize: 11,
-    color: Colors.text.muted + '70', marginTop: 8,
+    textAlign: 'center', fontSize: 11, color: Colors.text.muted,
+    marginTop: 4, paddingHorizontal: 36,
   },
   settingsBtn: {
     alignSelf: 'center', marginTop: 12,
@@ -363,10 +353,7 @@ const styles = StyleSheet.create({
   },
   settingsBtnText: { color: Colors.accent.primary, fontWeight: '600', fontSize: 13 },
 
-  // Auto lang picker
-  autoLangPicker: {
-    paddingHorizontal: 16, paddingBottom: 8, flex: 1,
-  },
+  autoLangPicker: { paddingHorizontal: 16, paddingBottom: 8 },
   autoLangTitle: {
     fontSize: 13, color: Colors.text.muted, textAlign: 'center',
     marginBottom: 10, fontWeight: '600',

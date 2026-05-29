@@ -50,8 +50,8 @@ export default function TranslatorScreen() {
   const voice = useVoiceRecorder({
     onTranscript: (text) => {
       setSourceText(text);
-      setShowVoiceModal(false);
       performTranslation();
+      // Modal stays open so user sees transcript + translation
     },
     onError: (err) => console.warn('Voice error:', err),
   });
@@ -193,12 +193,7 @@ export default function TranslatorScreen() {
                     </TouchableOpacity>
                   </>
                 ) : null}
-                <InlineMicButton state={voice.state} onPress={() => {
-                  setShowVoiceModal(true);
-                  if (sourceLang !== 'auto') {
-                    setTimeout(() => voice.startListening(sourceLang), 200);
-                  }
-                }} />
+                <InlineMicButton state={voice.state} onPress={() => setShowVoiceModal(true)} />
               </View>
             </View>
           </View>
@@ -307,7 +302,10 @@ export default function TranslatorScreen() {
         visible={showVoiceModal}
         state={voice.state}
         sourceLang={sourceLang}
+        targetLang={targetLang}
         partialText={voice.partialText}
+        recognizedText={sourceText}
+        translatedText={translatedText}
         onStartPress={() => voice.startListening(sourceLang === 'auto' ? '' : sourceLang)}
         onStopPress={() => voice.stopListening()}
         onClose={() => { voice.cancelListening(); setShowVoiceModal(false); }}
