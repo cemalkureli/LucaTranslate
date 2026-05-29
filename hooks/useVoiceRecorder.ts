@@ -10,7 +10,8 @@ export interface VoiceSettings {
 }
 
 const VOICE_SETTINGS_KEY = 'lingua_voice_settings';
-const SILENCE_MS = 5000;
+const SILENCE_MS = 5000;   // 5s of no new speech → auto-stop
+const CHECK_INTERVAL = 300; // check every 300ms
 
 const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
   engine: 'web-speech',
@@ -60,6 +61,13 @@ function toLocale(code: string): string {
   return VOICE_LOCALE[code] ?? code;
 }
 
+// Android extras: tell SpeechRecognizer to wait longer before cutting off
+const ANDROID_OPTS = {
+  EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS: 3000,
+  EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS: 3000,
+  EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS: 30000,
+};
+
 async function transcribeWithOpenAI(uri: string, lang: string, apiKey: string): Promise<string> {
   const formData = new FormData();
   formData.append('file', { uri, type: 'audio/wav', name: 'voice.wav' } as any);
@@ -76,30 +84,35 @@ async function transcribeWithOpenAI(uri: string, lang: string, apiKey: string): 
 }
 
 export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
-  // Always-fresh ref so Voice event handlers never have stale closures
   const optsRef = useRef(opts);
   useEffect(() => { optsRef.current = opts; });
 
   const [state, setState] = useState<VoiceState>('idle');
   const [partialText, setPartialText] = useState('');
 
-  // Recording session state — all refs so Voice handlers see latest values
-  const activeRef = useRef(false);      // recording session is live
-  const stoppingRef = useRef(false);    // finalization requested
-  const accumulatedRef = useRef('');    // text accumulated across sentence restarts
+  const activeRef = useRef(false);
+  const stoppingRef = useRef(false);
+  const accumulatedRef = useRef('');
   const currentLangRef = useRef('');
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const recordingRef = useRef<Audio.Recording | null>(null);  // Whisper only
+  const recordingRef = useRef<Audio.Recording | null>(null);
 
-  const clearTimer = useCallback(() => {
-    if (timerRef.current) { clearTimeout(timerRef.current); timerRef.current = null; }
+  // Silence detection via interval + timestamp (robust across Android restarts)
+  // lastSpeechRef tracks when we last received actual speech (partial or results)
+  const lastSpeechRef = useRef(0);
+  const silenceIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const clearSilenceCheck = useCallback(() => {
+    if (silenceIntervalRef.current) {
+      clearInterval(silenceIntervalRef.current);
+      silenceIntervalRef.current = null;
+    }
   }, []);
 
-  // fnRef holds functions that must always be latest — used inside Voice event handlers
-  const fnRef = useRef({ finalize: () => {}, resetTimer: () => {} });
+  // fnRef: always-fresh functions for use inside Voice event handlers
+  const fnRef = useRef({ finalize: () => {}, triggerStop: () => {} });
 
   fnRef.current.finalize = () => {
-    clearTimer();
+    clearSilenceCheck();
     const text = accumulatedRef.current.trim();
     accumulatedRef.current = '';
     setPartialText('');
@@ -109,27 +122,35 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
     if (text) optsRef.current.onTranscript(text);
   };
 
-  fnRef.current.resetTimer = () => {
-    clearTimer();
-    // After SILENCE_MS of no new partial results, auto-stop
-    timerRef.current = setTimeout(() => {
-      if (!activeRef.current || stoppingRef.current) return;
-      stoppingRef.current = true;
-      Voice?.stop().catch(() => {});
-      // Fallback: if onSpeechResults never fires after stop, finalize anyway
-      timerRef.current = setTimeout(() => {
-        if (stoppingRef.current) fnRef.current.finalize();
-      }, 2000);
-    }, SILENCE_MS);
+  fnRef.current.triggerStop = () => {
+    if (!activeRef.current || stoppingRef.current) return;
+    stoppingRef.current = true;
+    clearSilenceCheck();
+    Voice?.stop().catch(() => {});
+    // Fallback: if onSpeechResults never fires after Voice.stop(), finalize anyway
+    setTimeout(() => { if (stoppingRef.current) fnRef.current.finalize(); }, 2000);
   };
 
-  // Register Voice event handlers once — fnRef keeps them fresh
+  const startSilenceCheck = useCallback(() => {
+    clearSilenceCheck();
+    lastSpeechRef.current = Date.now();
+    silenceIntervalRef.current = setInterval(() => {
+      if (!activeRef.current || stoppingRef.current) {
+        clearSilenceCheck();
+        return;
+      }
+      if (Date.now() - lastSpeechRef.current >= SILENCE_MS) {
+        fnRef.current.triggerStop();
+      }
+    }, CHECK_INTERVAL);
+  }, [clearSilenceCheck]);
+
   useEffect(() => {
     if (!Voice) return;
 
     Voice.onSpeechStart = () => {
       setState('recording');
-      fnRef.current.resetTimer();
+      // Do NOT reset lastSpeechRef here — only actual speech resets the silence clock
     };
 
     Voice.onSpeechPartialResults = (e: any) => {
@@ -138,27 +159,27 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
       const display = (accumulatedRef.current + ' ' + partial).trim();
       setPartialText(display);
       optsRef.current.onPartial?.(display);
-      fnRef.current.resetTimer();  // reset 5s silence window
+      lastSpeechRef.current = Date.now();  // ← Reset 5s silence window on every partial
     };
 
     Voice.onSpeechResults = (e: any) => {
-      clearTimer();
       const text = (e.value?.[0] ?? '').trim();
 
       if (!activeRef.current || stoppingRef.current) {
-        // Finalization path (silence timer fired or user tapped stop)
+        // Our silence check fired → finalize
         if (text) accumulatedRef.current = (accumulatedRef.current + ' ' + text).trim();
         fnRef.current.finalize();
         return;
       }
 
-      // Still active → accumulate sentence + restart for next sentence
+      // Android stopped mid-session (its own silence detection) → accumulate + restart
+      // The silence interval keeps running — no need to reset lastSpeechRef unless text found
       if (text) {
         accumulatedRef.current = (accumulatedRef.current + ' ' + text).trim();
         setPartialText(accumulatedRef.current);
+        lastSpeechRef.current = Date.now();  // Speech was confirmed, reset clock
       }
-      Voice.start(toLocale(currentLangRef.current)).catch(() => {});
-      fnRef.current.resetTimer();
+      Voice.start(toLocale(currentLangRef.current), ANDROID_OPTS).catch(() => {});
     };
 
     Voice.onSpeechEnd = () => {
@@ -168,7 +189,7 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
     Voice.onSpeechError = (e: any) => {
       const code = String(e.error?.code ?? '');
       const msg = String(e.error?.message ?? '');
-      // Error 7 = no speech / silence — normal between sentences, just restart
+      // Error 7 = no speech / no match — normal silence between restarts, just restart
       const isSilence =
         code === '7' ||
         msg.startsWith('7/') ||
@@ -177,8 +198,8 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
 
       if (isSilence) {
         if (activeRef.current && !stoppingRef.current) {
-          Voice.start(toLocale(currentLangRef.current)).catch(() => {});
-          // Timer keeps running — 5s since last partial
+          // Restart immediately — silence interval keeps counting from lastSpeechRef
+          Voice.start(toLocale(currentLangRef.current), ANDROID_OPTS).catch(() => {});
         } else {
           fnRef.current.finalize();
         }
@@ -186,7 +207,7 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
       }
 
       // Real error
-      clearTimer();
+      clearSilenceCheck();
       activeRef.current = false;
       stoppingRef.current = false;
       accumulatedRef.current = '';
@@ -198,19 +219,18 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
     };
 
     return () => { Voice.destroy().catch(() => {}); };
-  }, [clearTimer]);
+  }, [clearSilenceCheck]);
 
   const startListening = useCallback(async (lang: string = '') => {
     const settings = await getVoiceSettings();
 
-    // ── OpenAI Whisper path ──
+    // ── OpenAI Whisper ──
     if (settings.engine === 'whisper-openai') {
       if (!settings.openaiApiKey) {
         optsRef.current.onError?.('OpenAI API anahtarı eksik. Ayarlar → Ses tanıma.');
         return;
       }
       if (recordingRef.current) return;
-
       currentLangRef.current = lang;
       setState('recording');
       try {
@@ -246,21 +266,23 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
     activeRef.current = true;
     setPartialText('');
     setState('recording');
+    startSilenceCheck();  // Start 5s silence detection
 
     try {
-      await Voice.start(toLocale(lang));
+      await Voice.start(toLocale(lang), ANDROID_OPTS);
     } catch {
       optsRef.current.onError?.('Ses tanıma başlatılamadı.');
       setState('error');
       activeRef.current = false;
+      clearSilenceCheck();
       setTimeout(() => setState('idle'), 3000);
     }
-  }, []);
+  }, [startSilenceCheck, clearSilenceCheck]);
 
   const stopListening = useCallback(async () => {
     const settings = await getVoiceSettings();
 
-    // ── Whisper stop: finalize recording ──
+    // ── Whisper stop ──
     if (settings.engine === 'whisper-openai') {
       const rec = recordingRef.current;
       if (!rec) return;
@@ -284,20 +306,12 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
       return;
     }
 
-    // ── Web speech stop ──
-    if (!activeRef.current || stoppingRef.current) return;
-    clearTimer();
-    stoppingRef.current = true;
-    setState('processing');
-    try {
-      await Voice?.stop();
-    } catch {
-      fnRef.current.finalize();
-    }
-  }, [clearTimer]);
+    // ── Web speech stop (user tapped stop button) ──
+    fnRef.current.triggerStop();
+  }, []);
 
   const cancelListening = useCallback(async () => {
-    clearTimer();
+    clearSilenceCheck();
     activeRef.current = false;
     stoppingRef.current = false;
     accumulatedRef.current = '';
@@ -308,9 +322,9 @@ export function useVoiceRecorder(opts: UseVoiceRecorderOptions) {
       recordingRef.current = null;
     }
     setState('idle');
-  }, [clearTimer]);
+  }, [clearSilenceCheck]);
 
-  useEffect(() => () => { clearTimer(); }, [clearTimer]);
+  useEffect(() => () => { clearSilenceCheck(); }, [clearSilenceCheck]);
 
   return {
     state,
