@@ -55,6 +55,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   ],
   scheme: 'lingua',
   extra: {
+    eas: { projectId: 'badabeb4-5d26-499b-bf8f-dc11e28bfc02' },
     LIBRETRANSLATE_URL: process.env.LIBRETRANSLATE_URL || 'https://libretranslate.com',
     LIBRETRANSLATE_API_KEY: process.env.LIBRETRANSLATE_API_KEY || ''
   }
