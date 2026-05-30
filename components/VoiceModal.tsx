@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View, Text, StyleSheet, Modal, TouchableOpacity, Pressable, ScrollView,
 } from 'react-native';
@@ -8,9 +8,10 @@ import Animated, {
 } from 'react-native-reanimated';
 import { BlurView } from 'expo-blur';
 import { LinearGradient } from 'expo-linear-gradient';
+import * as Speech from 'expo-speech';
 import { VoiceState } from '../hooks/useVoiceRecorder';
 import { Colors, BorderRadius, LANGUAGES } from '../constants/theme';
-import { MicIcon, StopIcon, CloseIcon } from './Icons';
+import { MicIcon, StopIcon, CloseIcon, VolumeIcon, VolumeOffIcon } from './Icons';
 
 interface VoiceModalProps {
   visible: boolean;
@@ -70,6 +71,23 @@ export default function VoiceModal({
   const isProcessing = state === 'processing';
   const sourceLangData = LANGUAGES.find(l => l.code === sourceLang) || LANGUAGES[7];
   const targetLangData = LANGUAGES.find(l => l.code === targetLang);
+
+  const [isSpeaking, setIsSpeaking] = useState(false);
+
+  const handleSpeakTranslation = () => {
+    if (!translatedText) return;
+    if (isSpeaking) { Speech.stop(); setIsSpeaking(false); return; }
+    setIsSpeaking(true);
+    Speech.speak(translatedText, {
+      language: targetLang,
+      onDone: () => setIsSpeaking(false),
+      onError: () => setIsSpeaking(false),
+    });
+  };
+
+  useEffect(() => {
+    if (!visible) { Speech.stop(); setIsSpeaking(false); }
+  }, [visible]);
 
   const btnScale = useSharedValue(1);
   const btnStyle = useAnimatedStyle(() => ({ transform: [{ scale: btnScale.value }] }));
@@ -171,15 +189,26 @@ export default function VoiceModal({
 
               {/* Translation result — shown after recording stops */}
               {showTranslation && (
-                <View style={styles.translationBox}>
+                <TouchableOpacity
+                  style={[styles.translationBox, isSpeaking && styles.translationBoxActive]}
+                  onPress={handleSpeakTranslation}
+                  activeOpacity={0.75}
+                >
                   {targetLangData && (
                     <View style={styles.translationHeader}>
                       <Text style={styles.translationFlag}>{targetLangData.flag}</Text>
                       <Text style={styles.translationLang}>{targetLangData.nativeName}</Text>
+                      <View style={{ flex: 1 }} />
+                      {isSpeaking
+                        ? <VolumeOffIcon size={14} color={Colors.accent.cyan} />
+                        : <VolumeIcon size={14} color={Colors.text.muted} />}
                     </View>
                   )}
                   <Text style={styles.translationText}>{translatedText}</Text>
-                </View>
+                  <Text style={styles.translationTapHint}>
+                    {isSpeaking ? 'Durdurmak için dokun' : 'Seslendirmek için dokun'}
+                  </Text>
+                </TouchableOpacity>
               )}
 
               {/* Mic button */}
@@ -324,6 +353,13 @@ const styles = StyleSheet.create({
   translationLang: { fontSize: 11, color: Colors.accent.secondary, fontWeight: '600' },
   translationText: {
     fontSize: 18, color: Colors.text.primary, lineHeight: 26, fontWeight: '400',
+  },
+  translationBoxActive: {
+    borderColor: Colors.accent.cyan + '60',
+    backgroundColor: Colors.accent.cyan + '10',
+  },
+  translationTapHint: {
+    fontSize: 11, color: Colors.text.muted, marginTop: 4,
   },
 
   btnArea: {
